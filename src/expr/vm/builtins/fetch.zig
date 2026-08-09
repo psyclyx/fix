@@ -48,6 +48,7 @@ pub const FetchGitSpec = struct {
     rev: ?[]u8,
     ref: ?[]u8,
     submodules: bool,
+    all_refs: bool,
 
     pub fn deinit(self: FetchGitSpec, allocator: std.mem.Allocator) void {
         allocator.free(self.url);
@@ -63,6 +64,7 @@ pub const FetchGitSpec = struct {
             .rev = self.rev,
             .ref = self.ref,
             .submodules = self.submodules,
+            .all_refs = self.all_refs,
         };
     }
 };
@@ -344,6 +346,7 @@ fn fetchGitSpec(self: *VM, arg: Value) !FetchGitSpec {
             .rev = null,
             .ref = null,
             .submodules = false,
+            .all_refs = false,
         };
     }
 
@@ -360,6 +363,7 @@ pub fn fetchGitSpecFromAttrs(self: *VM, attrs_id: ObjectId) !FetchGitSpec {
     const ref = try optionalStringAttr(self, attrs_id, "ref");
     errdefer if (ref) |owned| self.allocator.free(owned);
     const submodules = try optionalBoolAttr(self, attrs_id, "submodules") orelse false;
+    const all_refs = try optionalBoolAttr(self, attrs_id, "allRefs") orelse false;
 
     return .{
         .url = url,
@@ -367,6 +371,7 @@ pub fn fetchGitSpecFromAttrs(self: *VM, attrs_id: ObjectId) !FetchGitSpec {
         .rev = rev,
         .ref = ref,
         .submodules = submodules,
+        .all_refs = all_refs,
     };
 }
 
