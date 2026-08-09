@@ -1242,6 +1242,41 @@ test "evaluate import through evaluator file cache" {
     try std.testing.expectEqual(@as(u32, 1), ev.sources.imports.entries.count());
 }
 
+test "path builtin coerces an outPath attrset path argument" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(std.testing.io, "tree", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tree/f.txt", .data = "payload" });
+
+    const cwd = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+    const tree_path = try std.fs.path.resolve(std.testing.allocator, &.{
+        cwd,
+        ".zig-cache",
+        "tmp",
+        &tmp.sub_path,
+        "tree",
+    });
+    defer std.testing.allocator.free(tree_path);
+
+    const source = try std.fmt.allocPrint(std.testing.allocator,
+        \\let
+        \\  direct = builtins.path {{ path = "{s}"; name = "t"; }};
+        \\  viaOutPath = builtins.path {{ path = {{ outPath = "{s}"; }}; name = "t"; }};
+        \\  viaToString = builtins.path {{ path = {{ __toString = _: "{s}"; }}; name = "t"; }};
+        \\  viaDotDot = builtins.path {{ path = {{ outPath = "{s}/x/../."; }}; name = "t"; }};
+        \\in direct == viaOutPath && direct == viaToString && direct == viaDotDot
+    , .{ tree_path, tree_path, tree_path, tree_path });
+    defer std.testing.allocator.free(source);
+
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    ev.setFileIo(std.testing.io);
+
+    const result = try ev.evaluate(source);
+    try std.testing.expect(result.asBool());
+}
+
 test "evaluate path builtins coerce outPath attrsets" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

@@ -125,11 +125,11 @@ pub fn builtinPath(self: *VM, arg: Value) !Value {
     const attrs_id = attrs.asObjectId();
 
     const path_id = try self.intern.intern("path");
-    const path_value = try vm_force.forceValue(self, try self.heap.getAttrValue(attrs_id, path_id));
-    const path = switch (path_value.kind()) {
-        .path, .string, .string_context, .heap_string => try vm_strings.stringBytes(self, path_value),
-        else => return error.TypeError,
-    };
+    // Nix's coerceToPath: paths and strings directly, anything else (an
+    // attrset via outPath/__toString, e.g. a flake input) through the
+    // non-copying string coercion.
+    const path_like = try vm_strings.stringLikeValue(self, try self.heap.getAttrValue(attrs_id, path_id));
+    const path = try vm_strings.stringBytes(self, path_like);
     if (!std.fs.path.isAbsolute(path)) return error.RelativePath;
 
     const name_value = try optionalAttr(self, attrs_id, "name");
