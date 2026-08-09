@@ -286,6 +286,35 @@ test "evaluate fetchGit builtin for local repository" {
     try std.testing.expect(!includes_untracked.asBool());
 }
 
+test "fetchGit and fetchTree follow Nix's shallow defaults for revCount" {
+    const cwd = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    ev.setFileIo(std.testing.io);
+    ev.policy.fetch_tree_enabled = true;
+
+    const cases = [_]struct { args: []const u8, has_rev_count: bool }{
+        .{ .args = "builtins.fetchGit {{ url = \"{s}\"; }}", .has_rev_count = true },
+        .{ .args = "builtins.fetchGit {{ url = \"{s}\"; shallow = true; }}", .has_rev_count = true },
+        .{ .args = "builtins.fetchTree {{ type = \"git\"; url = \"{s}\"; }}", .has_rev_count = false },
+        .{ .args = "builtins.fetchTree {{ type = \"git\"; url = \"{s}\"; shallow = false; }}", .has_rev_count = true },
+    };
+    inline for (cases) |case| {
+        const source = try std.fmt.allocPrint(std.testing.allocator, "builtins.hasAttr \"revCount\" (" ++ case.args ++ ")", .{cwd});
+        defer std.testing.allocator.free(source);
+        const has = try ev.evaluate(source);
+        try std.testing.expectEqual(case.has_rev_count, has.asBool());
+    }
+
+    // The legacy builtin backfills revCount for a shallow fetch, as 0.
+    const zero_source = try std.fmt.allocPrint(std.testing.allocator, "(builtins.fetchGit {{ url = \"{s}\"; shallow = true; }}).revCount", .{cwd});
+    defer std.testing.allocator.free(zero_source);
+    const zero = try ev.evaluate(zero_source);
+    try std.testing.expectEqual(@as(i64, 0), zero.asInt());
+}
+
 test "evaluate fetchurl builtin through fetch cache" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

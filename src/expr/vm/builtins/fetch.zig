@@ -49,6 +49,7 @@ pub const FetchGitSpec = struct {
     ref: ?[]u8,
     submodules: bool,
     all_refs: bool,
+    shallow: bool,
 
     pub fn deinit(self: FetchGitSpec, allocator: std.mem.Allocator) void {
         allocator.free(self.url);
@@ -65,6 +66,7 @@ pub const FetchGitSpec = struct {
             .ref = self.ref,
             .submodules = self.submodules,
             .all_refs = self.all_refs,
+            .shallow = self.shallow,
         };
     }
 };
@@ -254,23 +256,41 @@ pub fn builtinFetchGit(self: *VM, arg: Value) !Value {
 
     const result = try offloadFetch(self, .git, spec.borrowed());
     defer result.deinit(self.fetchers.allocator);
-    return gitResultValue(self, spec.name, result);
+    // fetchGit always carries `revCount` (0 for a shallow fetch): Nix's
+    // emitTreeAttrs backfills it for the legacy builtin. Only fetchTree
+    // omits it (see the flakes call site).
+    return gitResultValue(self, spec.name, spec.url, result, false);
 }
 
-pub fn gitResultValue(self: *VM, name: []const u8, result: FetchService.GitResult) !Value {
+pub fn gitResultValue(self: *VM, name: []const u8, url: []const u8, result: FetchService.GitResult, omit_rev_count: bool) !Value {
     const out = try ingestFetchedTree(self, result.out_path, name, result.rev, git_filter);
     defer out.deinit(self.allocator);
+    // rev_count -1 marks a truncated history (the repository is shallow but
+    // `shallow = true` was not passed): the attr exists but forcing it errors,
+    // as in Nix. A shallow fetchTree result omits `revCount` entirely instead.
+    const rev_count_value = if (result.rev_count >= 0)
+        Value.int(result.rev_count)
+    else
+        try shared.makeBuiltinThunk(self, .shallow_rev_count, &.{Value.string(try self.intern.intern(url))});
     const entries = [_]heap_mod.AttrEntry{
         .{ .name = try self.intern.intern("lastModified"), .value = Value.int(result.last_modified) },
         .{ .name = try self.intern.intern("lastModifiedDate"), .value = Value.string(try self.intern.intern(result.last_modified_date)) },
         .{ .name = try self.intern.intern("narHash"), .value = try treeNarHashValue(self, out.out_path, out.nar_hash, ".git") },
         .{ .name = try self.intern.intern("outPath"), .value = try fetchedPathValue(self, out.out_path) },
         .{ .name = try self.intern.intern("rev"), .value = Value.string(try self.intern.intern(result.rev)) },
-        .{ .name = try self.intern.intern("revCount"), .value = Value.int(result.rev_count) },
         .{ .name = try self.intern.intern("shortRev"), .value = Value.string(try self.intern.intern(result.short_rev)) },
         .{ .name = try self.intern.intern("submodules"), .value = Value.boolVal(result.submodules) },
+        .{ .name = try self.intern.intern("revCount"), .value = rev_count_value },
     };
-    return Value.attrs(try self.heap.addAttrs(&entries));
+    return Value.attrs(try self.heap.addAttrs(entries[0 .. entries.len - @intFromBool(omit_rev_count)]));
+}
+
+pub fn shallowRevCount(self: *VM, url_value: Value) !Value {
+    const url = self.intern.get(url_value.asInternId());
+    const message = try std.fmt.allocPrint(self.allocator, "'{s}' is a shallow Git repository, so 'revCount' is not available", .{url});
+    defer self.allocator.free(message);
+    try vm_trace.setErrorMessage(self, message);
+    return error.FetchGitShallowRepository;
 }
 
 /// The `narHash` value for a fetched tree: an eager SRI string when we already
@@ -364,13 +384,14 @@ fn fetchGitSpec(self: *VM, arg: Value) !FetchGitSpec {
             .ref = null,
             .submodules = false,
             .all_refs = false,
+            .shallow = false,
         };
     }
 
-    return fetchGitSpecFromAttrs(self, value.asObjectId());
+    return fetchGitSpecFromAttrs(self, value.asObjectId(), false);
 }
 
-pub fn fetchGitSpecFromAttrs(self: *VM, attrs_id: ObjectId) !FetchGitSpec {
+pub fn fetchGitSpecFromAttrs(self: *VM, attrs_id: ObjectId, shallow_default: bool) !FetchGitSpec {
     const url = try dupPathAttr(self, attrs_id, "url");
     errdefer self.allocator.free(url);
     const name = try optionalStringAttr(self, attrs_id, "name") orelse try self.allocator.dupe(u8, "source");
@@ -381,6 +402,7 @@ pub fn fetchGitSpecFromAttrs(self: *VM, attrs_id: ObjectId) !FetchGitSpec {
     errdefer if (ref) |owned| self.allocator.free(owned);
     const submodules = try optionalBoolAttr(self, attrs_id, "submodules") orelse false;
     const all_refs = try optionalBoolAttr(self, attrs_id, "allRefs") orelse false;
+    const shallow = try optionalBoolAttr(self, attrs_id, "shallow") orelse shallow_default;
 
     return .{
         .url = url,
@@ -389,6 +411,7 @@ pub fn fetchGitSpecFromAttrs(self: *VM, attrs_id: ObjectId) !FetchGitSpec {
         .ref = ref,
         .submodules = submodules,
         .all_refs = all_refs,
+        .shallow = shallow,
     };
 }
 
