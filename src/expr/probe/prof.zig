@@ -92,6 +92,12 @@ pub const Path = enum {
     parse,
     /// `Compiler.compileAndFinish` — AST → bytecode for an imported file.
     compile,
+    /// `chunk_cache.load` — decode a cached unit and register its chunks,
+    /// which replaces `parse` + `compile` on a cache hit. Without this scope
+    /// the work has no bucket of its own, so it lands in the exclusive time of
+    /// whichever builtin drove the import and makes `import` look slow. The
+    /// file read is not included; it happens before this scope opens.
+    chunk_cache_load,
     /// `strictness.stampOnBuilder` — per-chunk strictness analysis (a
     /// second AST walk building NameSets). Sub-phase of `compile`; its
     /// exclusive cycles are carved out of the `compile` bucket.
