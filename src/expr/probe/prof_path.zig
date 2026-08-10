@@ -10,8 +10,8 @@
 //! HOW. Run at `--workers=1`: forcing is then cleanly nested (one
 //! fiber, LIFO on the C stack), so every `forceThunkImpl` claim is a
 //! span that contains exactly the spans of the thunks it forced. We
-//! record each span's wall cycles (rdtsc) and its parent, keyed by the
-//! body chunk (≈ a Nix source location).
+//! record each span's wall ticks (`base.timebase`) and its parent,
+//! keyed by the body chunk (≈ a Nix source location).
 //!
 //! From that tree we compute, per span:
 //!   total = wall cycles of the whole subtree
@@ -41,14 +41,14 @@
 //!   ./zig-out/bin/fix eval --file X --workers=1 --stats 2>&1
 
 const std = @import("std");
-const builtin = @import("builtin");
 const build_options = @import("build_options");
 const BuiltinId = @import("runtime").builtins.BuiltinId;
 const InternTable = @import("runtime").intern.InternTable;
 const ChunkRegistry = @import("../bytecode.zig").chunk.ChunkRegistry;
 const worker_id = @import("base").worker_id;
+const timebase = @import("base").timebase;
 
-pub const enabled: bool = build_options.prof_path and builtin.cpu.arch == .x86_64;
+pub const enabled: bool = build_options.prof_path and timebase.supported;
 
 /// Key space (chunk ids on a NixOS toplevel top out in the low
 /// millions, far under builtin_key_base):
@@ -93,14 +93,7 @@ var root_span: u64 = 0;
 var overflowed: bool = false;
 
 inline fn rdtsc() u64 {
-    var low: u32 = undefined;
-    var high: u32 = undefined;
-    asm volatile ("rdtsc"
-        : [low] "={eax}" (low),
-          [high] "={edx}" (high),
-        :
-        : .{ .memory = true });
-    return (@as(u64, high) << 32) | @as(u64, low);
+    return timebase.read();
 }
 
 /// Begin a force span keyed by `key`. Returns a token for `exit`, or a
@@ -252,4 +245,11 @@ pub fn locName(registry: *const ChunkRegistry, intern: *const InternTable, key: 
     const span = (best orelse return "<no span>").span;
     const file = if (span.file) |fid| intern.get(fid) else "?";
     return std.fmt.bufPrint(&name_scratch, "{s}:{d}:{d}", .{ file, span.line, span.column }) catch "<fmt err>";
+}
+
+test "the path probe follows the build flag on every supported arch" {
+    if (!build_options.prof_path) return error.SkipZigTest;
+    if (!timebase.supported) return error.SkipZigTest;
+    try std.testing.expect(enabled);
+    try std.testing.expect(rdtsc() != 0);
 }
