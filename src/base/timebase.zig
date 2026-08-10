@@ -72,6 +72,20 @@ pub fn name() []const u8 {
     };
 }
 
+/// Convert a tick count to nanoseconds. Returns null when `hz()` does not
+/// know the rate, which is the x86_64 case.
+///
+/// A tick is coarse on aarch64, so one measurement of a short scope is 0
+/// ticks or 1 tick. An average over many measurements is not coarse: the
+/// error of one measurement is its phase against the tick edge, and that
+/// phase is independent of the scope, so the errors cancel as the count
+/// grows. Give this function a mean, not one sample.
+pub fn toNs(ticks: f64) ?f64 {
+    const freq = hz();
+    if (freq == 0) return null;
+    return ticks * std.time.ns_per_s / @as(f64, @floatFromInt(freq));
+}
+
 /// Print one line that identifies the counter, for a report header. The
 /// probes print raw ticks, so a reader needs this line to know what one tick
 /// is worth. `prefix` is the report's own tag, for example "prof".
@@ -82,6 +96,17 @@ pub fn reportLine(prefix: []const u8) void {
     } else {
         std.debug.print("{s}: timebase={s} {d} Hz\n", .{ prefix, name(), freq });
     }
+}
+
+test "a full second of ticks converts to a full second of nanoseconds" {
+    if (hz() == 0) return error.SkipZigTest;
+    const one_second = toNs(@floatFromInt(hz())).?;
+    try std.testing.expectApproxEqRel(@as(f64, 1_000_000_000.0), one_second, 1e-9);
+}
+
+test "the conversion refuses an unknown frequency" {
+    if (hz() != 0) return error.SkipZigTest;
+    try std.testing.expect(toNs(1.0) == null);
 }
 
 test "supported agrees with the target architecture" {

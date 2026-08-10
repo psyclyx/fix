@@ -346,6 +346,30 @@ pub inline fn end(comptime path: Path, t: u64) void {
     }
 }
 
+/// Print the mean exclusive ticks per call, then end the line.
+///
+/// The mean is fractional on purpose. Integer division discards everything
+/// below one tick, and one tick is 40 ns on a 25 MHz counter — more than a
+/// cheap scope such as `force_value` costs, which made its average read as
+/// zero. The mean itself keeps the resolution the counter appears to lack,
+/// because each measurement's error is its phase against the tick edge and
+/// those errors cancel over millions of calls.
+///
+/// `avg_ns` appears only when the counter states its rate. See
+/// `base.timebase.toNs`.
+fn printAvgExcl(cycles: u64, calls: u64) void {
+    if (calls == 0) {
+        std.debug.print("\n", .{});
+        return;
+    }
+    const avg = @as(f64, @floatFromInt(cycles)) / @as(f64, @floatFromInt(calls));
+    if (timebase.toNs(avg)) |ns| {
+        std.debug.print(" avg_excl={d:.3} avg_ns={d:.1}\n", .{ avg, ns });
+    } else {
+        std.debug.print(" avg_excl={d:.3}\n", .{avg});
+    }
+}
+
 /// Dump the main-thread path + per-builtin cycle samples
 /// (`--stats`). Lives beside the counters it reads.
 /// `registry`/`intern` resolve chunk keys to source locations for the
@@ -355,13 +379,13 @@ pub fn report(registry: *const ChunkRegistry, intern: *const InternTable) void {
     inline for (@typeInfo(Path).@"enum".fields) |f| {
         const samp = samples[f.value];
         if (samp.calls != 0) {
-            std.debug.print("prof: {s}: excl_cy={d} incl_cy={d} calls={d} avg_excl={d}\n", .{
+            std.debug.print("prof: {s}: excl_cy={d} incl_cy={d} calls={d}", .{
                 f.name,
                 samp.cycles,
                 samp.cycles_inclusive,
                 samp.calls,
-                samp.cycles / samp.calls,
             });
+            printAvgExcl(samp.cycles, samp.calls);
         }
     }
     // String-machinery census.
@@ -389,7 +413,8 @@ pub fn report(registry: *const ChunkRegistry, intern: *const InternTable) void {
     for (top_b) |entry| {
         if (entry.cycles == 0) break;
         const name = @import("runtime").builtins.displayName(@enumFromInt(entry.id));
-        std.debug.print("  {s}: excl={d} incl={d} calls={d} avg_excl={d}\n", .{ name, entry.cycles, entry.incl, entry.calls, entry.cycles / entry.calls });
+        std.debug.print("  {s}: excl={d} incl={d} calls={d}", .{ name, entry.cycles, entry.incl, entry.calls });
+        printAvgExcl(entry.cycles, entry.calls);
     }
     // Attr inline-cache, thunk-memo, repeat-force, and attr-lookup size censuses.
     prof_census.reportCaches();

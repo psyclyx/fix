@@ -46,7 +46,13 @@ The cycle probes read a CPU counter directly, because a system call is too expen
 
 Each report starts with a `timebase=` line that names the counter and gives its frequency, so the reader knows what one tick is worth. The two units are not comparable, and a number from one machine is not comparable with a number from a different machine.
 
-On aarch64 one tick is 10 ns to 41 ns, against a fraction of a nanosecond for the TSC. A cheap scope therefore measures 0 ticks or 1 tick. The totals and the percentages over millions of calls stay correct, but the `avg_excl` column for the cheapest paths is noise on this architecture. A 25 MHz machine reports `force_value: excl_cy=18252279 calls=52500008 avg_excl=0` on `bench/workloads/torture/math-heavy.nix`: the bucket total is sound, the per-call average is below the quantum. Read the shares, not the per-call averages. The `pmccntr_el0` register gives true cycles, but the Linux kernel traps it in userspace by default, so the probes do not use it.
+On aarch64 one tick is 10 ns to 41 ns, against a fraction of a nanosecond for the TSC. One measurement of a cheap scope is therefore 0 ticks or 1 tick.
+
+A mean over many measurements does not have that limit. The error of one measurement is its phase against the tick edge, and that phase does not correlate with the scope, so the errors cancel as the call count grows. `-Dprof-main` prints `avg_excl` as a fraction for this reason, and adds `avg_ns` when the counter states its rate. A 25 MHz machine reports `force_value: excl_cy=16115384 calls=52500008 avg_excl=0.307 avg_ns=12.3` on `bench/workloads/torture/math-heavy.nix`: 12.3 ns per call, from a counter whose tick is 40 ns.
+
+Distrust `avg_ns` only where the call count is small. A row with two calls carries up to one tick of error in each, so a short scope called twice tells you little. Rows with millions of calls are sound.
+
+The `pmccntr_el0` register gives true CPU cycles at core frequency, roughly 100x finer. The probes do not use it: Linux keeps `kernel.perf_user_access` at 0 by default, so the instruction traps, and even when it is 1 the counter needs a `perf_event_open` and an `mmap` per thread to find its index. It also counts cycles that stop and scale with core frequency, which answers a different question than the fixed-rate wall ticks these probes report.
 
 ## `--stats`
 
