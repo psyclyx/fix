@@ -1,6 +1,8 @@
-//! Lightweight rdtsc-based profiler for the main thread's hot
+//! Lightweight tick-counter profiler for the main thread's hot
 //! serial paths. Build-gated on `-Dprof-main`; off-build compiles
-//! to no-ops with zero runtime footprint.
+//! to no-ops with zero runtime footprint. `base.timebase` supplies the
+//! counter, so one tick is a TSC cycle on x86_64 and a generic-timer
+//! tick on aarch64.
 //!
 //! Helpers don't update counters (we only care about main's serial
 //! pathlength). Each evaluator fiber owns its nesting stack, so suspension
@@ -26,9 +28,9 @@
 const std = @import("std");
 const InternTable = @import("runtime").intern.InternTable;
 const ChunkRegistry = @import("../bytecode.zig").chunk.ChunkRegistry;
-const builtin = @import("builtin");
 const build_options = @import("build_options");
 const worker_id = @import("base").worker_id;
+const timebase = @import("base").timebase;
 const BuiltinId = @import("runtime").builtins.BuiltinId;
 const prof_path_mod = @import("prof_path.zig");
 const prof_age = @import("prof_age.zig");
@@ -37,8 +39,8 @@ const prof_fiber = @import("prof_fiber.zig");
 const prof_census = @import("prof_census.zig");
 
 /// Compile-time switch. False when `-Dprof-main` wasn't passed.
-/// `rdtsc` is x86_64-only, so we additionally gate on arch.
-pub const enabled: bool = build_options.prof_main and builtin.cpu.arch == .x86_64;
+/// The probe needs a tick counter, so it also gates on the architecture.
+pub const enabled: bool = build_options.prof_main and timebase.supported;
 
 /// Tag for every instrumented path. Keep names short — they appear
 /// in the stats line as-is.
@@ -258,20 +260,12 @@ inline fn token(stack: *const Stack, idx: usize) u64 {
     return (@as(u64, stack.generation) << 32) | @as(u64, @intCast(idx));
 }
 
-/// Read the TSC. `rdtsc` returns a 64-bit counter formed from
-/// edx:eax. We use it as a coarse time source — the TSC is
-/// invariant on modern x86_64 so it doesn't pause across power
-/// states; the ratio to wall time is constant within a run.
+/// Read the tick counter. The unit is one tick of `base.timebase`: a TSC
+/// cycle on x86_64, a generic-timer tick on aarch64. The name stays `rdtsc`
+/// because `prof_age.zig`, `prof_census.zig` and `vm/force.zig` call it.
 pub inline fn rdtsc() u64 {
     if (!enabled) return 0;
-    var low: u32 = undefined;
-    var high: u32 = undefined;
-    asm volatile ("rdtsc"
-        : [low] "={eax}" (low),
-          [high] "={edx}" (high),
-        :
-        : .{ .memory = true });
-    return (@as(u64, high) << 32) | @as(u64, low);
+    return timebase.read();
 }
 
 /// Start a measurement on the main thread. Returns a sentinel
@@ -472,4 +466,11 @@ test "fiber profiler stacks remain isolated across suspension" {
     end(.force_value, outer);
     try std.testing.expectEqual(@as(usize, 0), suspended.len);
     leaveFiber();
+}
+
+test "the main probe follows the build flag on every supported arch" {
+    if (!build_options.prof_main) return error.SkipZigTest;
+    if (!timebase.supported) return error.SkipZigTest;
+    try std.testing.expect(enabled);
+    try std.testing.expect(rdtsc() != 0);
 }
