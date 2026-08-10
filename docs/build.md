@@ -38,7 +38,7 @@ All are `bool` and off unless noted. These are exactly the flags `build.zig` def
 | diagnostics | `debug-checks` | VM dispatch invariant assertions (**defaults on** in Debug builds) |
 | | `vm-trace` | enable VM execution tracing (surfaced by `--vm-trace`) → [cli.md](cli.md) |
 | | `thunks-log` | per-thunk lifecycle event log (surfaced by `--thunks-log`) → [cli.md](cli.md) |
-| profiling | `prof-main` | rdtsc-time the main thread's hot serial paths; reported via `--stats` → [perf/probes.md](perf/probes.md) |
+| profiling | `prof-main` | time the main thread's hot serial paths with the CPU tick counter; reported via `--stats` → [perf/probes.md](perf/probes.md) |
 | | `prof-path` | record the force-call tree + critical path (workers=1); reported via `--stats` → [perf/probes.md](perf/probes.md) |
 | compilation | `profile` | keep symbols + frame pointers (sets `strip=false`, `omit_frame_pointer=false`) |
 | verification | `tsan` | instrument the evaluator graph with ThreadSanitizer; x86_64 Linux only → [concurrency-testing.md](concurrency-testing.md) |
