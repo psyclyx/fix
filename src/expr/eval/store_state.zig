@@ -1,7 +1,8 @@
 //! Store-side evaluator state that survives language-state teardown.
 //!
-//! This is the composition point for realization, the daemon runtime, and the
-//! realization-owned adapter that parks daemon work off compute fibers.
+//! This is the composition point for realization, the default daemon runtime,
+//! and the adapter that parks daemon work off compute fibers. Alternate store
+//! drivers own their execution policy and do not use this runtime.
 
 const std = @import("std");
 const store = @import("store");
@@ -29,6 +30,10 @@ pub const StoreState = struct {
         self.daemon_runtime.deinit();
         self.allocator.destroy(self.daemon_runtime);
         self.realization.deinit();
+    }
+
+    pub fn setBackend(self: *StoreState, driver: store.BackendDriver) !void {
+        return self.realization.setBackend(driver);
     }
 
     pub fn buildPaths(self: *StoreState, paths: []const []const u8, sink: ?store.daemon.BuildSink, mode: store.daemon.BuildMode) !void {

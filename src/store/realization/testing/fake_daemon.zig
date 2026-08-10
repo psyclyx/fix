@@ -461,10 +461,32 @@ pub const FakeDaemon = struct {
         if (fail) return writeDaemonError(output, "scripted permanent add failure");
 
         try wire.writeInt(output, wire.stderr_last);
-        const returned_path = try std.fmt.allocPrint(self.allocator, "/nix/store/fake-{s}", .{name});
+        // Realization checks that the store independently computed the same
+        // path. The worker protocol carries only `name` in AddToStore, so this
+        // fake recovers the complete expected path from the preceding
+        // IsValidPath operation with the same store name. Direct protocol tests
+        // without such a matching query retain the synthetic fallback.
+        const returned_path = (try self.queriedPathForName(name)) orelse
+            try std.fmt.allocPrint(self.allocator, "/nix/store/fake-{s}", .{name});
         defer self.allocator.free(returned_path);
         try writeValidPathInfo(output, returned_path);
         try output.flush();
+    }
+
+    fn queriedPathForName(self: *FakeDaemon, name: []const u8) !?[]u8 {
+        self.mu.lock();
+        defer self.mu.unlock();
+        var index = self.operations.items.len;
+        while (index > 0) {
+            index -= 1;
+            const operation = self.operations.items[index];
+            if (operation.kind != .query) continue;
+            const base = std.fs.path.basename(operation.subject);
+            const queried_name = if (base.len > 33 and base[32] == '-') base[33..] else base;
+            if (std.mem.eql(u8, queried_name, name))
+                return try self.allocator.dupe(u8, operation.subject);
+        }
+        return null;
     }
 
     fn handleBuild(self: *FakeDaemon, input: *std.Io.Reader, output: *std.Io.Writer) !void {

@@ -3,8 +3,9 @@
 
 const Future = @import("runtime").future.Future;
 const DaemonPool = @import("../daemon.zig").DaemonPool;
+const backend = @import("../backend.zig");
 
-pub const WorkFn = *const fn (connection: ?*anyopaque, context: *anyopaque) void;
+pub const WorkFn = backend.WorkFn;
 
 pub const Executor = struct {
     run_pool_fn: *const fn (pool: *DaemonPool, work: WorkFn, context: *anyopaque) void,

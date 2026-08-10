@@ -2627,19 +2627,24 @@ pub const Engine = struct {
             error.FileNotFound => {}, // not on this machine — a remote store
             else => return err,
         }
-        return self.store.realization.readFileViaDaemon(allocator, path);
+        return self.store.realization.readFileViaStore(allocator, path);
     }
 
-    /// Read a store path's contents via the daemon (`NarFromPath`), bypassing the
-    /// local disk. For a remote store, and a test hook for the read path.
+    /// Read a store path's contents through the selected backend, bypassing the
+    /// local disk. Useful for a remote store and as a test hook.
+    pub fn readFileViaStore(self: *Engine, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+        return self.store.realization.readFileViaStore(allocator, path);
+    }
+
+    /// Compatibility spelling for callers that assume the default daemon.
     pub fn readFileViaDaemon(self: *Engine, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-        return self.store.realization.readFileViaDaemon(allocator, path);
+        return self.readFileViaStore(allocator, path);
     }
 
     pub const AsyncBuildRequest = StoreState.AsyncBuildRequest;
 
-    /// Submit a fully materialized derivation to the daemon pool without
-    /// waiting for its build to finish.
+    /// Submit a fully materialized derivation to the selected store driver
+    /// without waiting for its build to finish.
     pub fn submitBuild(self: *Engine, request: *AsyncBuildRequest) void {
         self.store.submitBuild(request);
     }
@@ -2674,6 +2679,12 @@ pub const Engine = struct {
     /// `set_options`) applied when the store connects. See `setup.configure`.
     pub fn setDaemonBuildSettings(self: *Engine, settings: store_domain.daemon.BuildSettings) !void {
         return self.store.realization.setBuildSettings(settings);
+    }
+
+    /// Select an alternate store implementation before backend execution
+    /// starts. The driver is owned by the Engine's store state until `deinit`.
+    pub fn setStoreBackend(self: *Engine, driver: store_domain.BackendDriver) !void {
+        return self.store.setBackend(driver);
     }
 
     /// Override the nix-daemon socket path (`$NIX_DAEMON_SOCKET_PATH`).

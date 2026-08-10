@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const sync = @import("base").sync;
+const store_backend = @import("../backend.zig");
 
 /// Per-worker connection lifecycle. `open` runs once per worker thread (its own
 /// connection, opened warm at spawn); `close` runs at shutdown. A failed `open`
@@ -49,15 +50,9 @@ pub const DaemonPool = struct {
     started: bool = false,
     shutdown: bool = false,
 
-    /// A unit of daemon work. `run` receives the worker's connection (null if the
-    /// worker could not open one — the closure must treat that as unavailable).
-    /// `next` is the intrusive queue link; the job lives on the parked caller's
-    /// stack, so `submit` never allocates.
-    pub const Job = struct {
-        run: *const fn (conn: ?*anyopaque, ctx: *anyopaque) void,
-        ctx: *anyopaque,
-        next: ?*Job = null,
-    };
+    /// A unit of backend work. The job lives on the parked caller's stack, so
+    /// submission stays allocation-free.
+    pub const Job = store_backend.Job;
 
     pub fn init(allocator: std.mem.Allocator, backend: Backend, worker_count: usize) DaemonPool {
         return .{ .allocator = allocator, .backend = backend, .worker_count = @max(worker_count, 1) };
