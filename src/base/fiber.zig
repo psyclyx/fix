@@ -36,6 +36,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const base_options = @import("base_options");
+const timebase = @import("timebase.zig");
 
 const tsan_enabled = base_options.tsan_enabled;
 const TSanHandle = if (tsan_enabled) *anyopaque else void;
@@ -59,7 +60,7 @@ comptime {
     }
 }
 
-/// Fiber cost census (piggybacks on `-Dprof-main`): rdtsc bracketing of
+/// Fiber cost census (piggybacks on `-Dprof-main`): tick bracketing of
 /// the swap-in (dispatcher → fiber body) and swap-out (fiber body →
 /// dispatcher) paths, threadlocal so the accumulation itself is free of
 /// coherence traffic. `Worker.runFiber` seeds `census_pre_swap` at its
@@ -68,7 +69,7 @@ comptime {
 /// (run_mu, timeline branch, spec-ctx refresh, `resume_` setup, the asm
 /// swap) and the swap-out window symmetric machinery on the way back.
 /// Zero-footprint when the build flag is off.
-pub const census_enabled: bool = base_options.fiber_census and builtin.cpu.arch == .x86_64;
+pub const census_enabled: bool = base_options.fiber_census and timebase.supported;
 
 threadlocal var census_pre_swap: u64 = 0;
 threadlocal var census_exit_swap: u64 = 0;
@@ -110,14 +111,7 @@ pub noinline fn censusDrain() CensusSample {
 
 pub inline fn censusNow() u64 {
     if (comptime !census_enabled) return 0;
-    var low: u32 = undefined;
-    var high: u32 = undefined;
-    asm volatile ("rdtsc"
-        : [low] "={eax}" (low),
-          [high] "={edx}" (high),
-        :
-        : .{ .memory = true });
-    return (@as(u64, high) << 32) | @as(u64, low);
+    return timebase.read();
 }
 
 /// Minimal saved state for an inactive fiber. The offsets are load-bearing —
@@ -938,4 +932,11 @@ test "reset is valid from the .ready state (never-resumed fiber)" {
     fiber.resume_();
     try testing.expectEqual(@as(u32, 1), ctx.calls);
     try testing.expectEqual(State.finished, fiber.state);
+}
+
+test "the fiber census follows the build flag on every supported arch" {
+    if (!base_options.fiber_census) return error.SkipZigTest;
+    if (!timebase.supported) return error.SkipZigTest;
+    try testing.expect(census_enabled);
+    try testing.expect(censusNow() != 0);
 }

@@ -32,6 +32,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
+const timebase = @import("base").timebase;
 const types = @import("types.zig");
 const Value = @import("value.zig").Value;
 const ChunkId = types.ChunkId;
@@ -47,7 +48,7 @@ pub const FailureRef = failure.FailureRef;
 
 /// `-Dprof-main` age-at-force probe support. These fields belong to thunks,
 /// not to the generic synchronization primitive used by imports and I/O.
-pub const created_tsc_enabled: bool = build_options.prof_main and builtin.cpu.arch == .x86_64;
+pub const created_tsc_enabled: bool = build_options.prof_main and timebase.supported;
 const CreatedTsc = if (created_tsc_enabled) u64 else void;
 pub const CreatedDemand = if (created_tsc_enabled) bool else void;
 const SpecDisp = if (created_tsc_enabled) u8 else void;
@@ -62,14 +63,7 @@ inline fn initSpecDisp() SpecDisp {
 
 inline fn nowCreatedTsc() CreatedTsc {
     if (comptime !created_tsc_enabled) return {};
-    var low: u32 = undefined;
-    var high: u32 = undefined;
-    asm volatile ("rdtsc"
-        : [low] "={eax}" (low),
-          [high] "={edx}" (high),
-        :
-        : .{ .memory = true });
-    return (@as(u64, high) << 32) | @as(u64, low);
+    return timebase.read();
 }
 
 pub const BytecodeThunk = struct {
@@ -827,4 +821,13 @@ test "thunk: reset wakes waiters and lets them retry" {
         .claimed => {},
         else => return error.ExpectedClaimedAfterReset,
     }
+}
+
+test "the created-tsc probe follows the build flag on every supported arch" {
+    if (!build_options.prof_main) return error.SkipZigTest;
+    if (!timebase.supported) return error.SkipZigTest;
+    try std.testing.expect(created_tsc_enabled);
+    // `CreatedTsc` is `void` while the gate is off, so the value check must
+    // not be analyzed in that state.
+    if (comptime created_tsc_enabled) try std.testing.expect(nowCreatedTsc() != 0);
 }
