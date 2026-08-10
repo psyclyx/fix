@@ -351,6 +351,7 @@ pub inline fn end(comptime path: Path, t: u64) void {
 /// `registry`/`intern` resolve chunk keys to source locations for the
 /// age-at-force per-body breakdown (same shapes as `prof_path.report`).
 pub fn report(registry: *const ChunkRegistry, intern: *const InternTable) void {
+    timebase.reportLine("prof");
     inline for (@typeInfo(Path).@"enum".fields) |f| {
         const samp = samples[f.value];
         if (samp.calls != 0) {
