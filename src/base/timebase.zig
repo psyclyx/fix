@@ -72,6 +72,18 @@ pub fn name() []const u8 {
     };
 }
 
+/// Print one line that identifies the counter, for a report header. The
+/// probes print raw ticks, so a reader needs this line to know what one tick
+/// is worth. `prefix` is the report's own tag, for example "prof".
+pub fn reportLine(prefix: []const u8) void {
+    const freq = hz();
+    if (freq == 0) {
+        std.debug.print("{s}: timebase={s}\n", .{ prefix, name() });
+    } else {
+        std.debug.print("{s}: timebase={s} {d} Hz\n", .{ prefix, name(), freq });
+    }
+}
+
 test "supported agrees with the target architecture" {
     const expected = builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64;
     try std.testing.expectEqual(expected, supported);

@@ -158,6 +158,7 @@ const Agg = struct { self_cy: u64 = 0, total_cy: u64 = 0, calls: u64 = 0 };
 /// Print the critical path and a flat source-attributed profile.
 pub fn report(registry: *const ChunkRegistry, intern: *const InternTable) void {
     if (!enabled) return;
+    timebase.reportLine("prof-path");
     const w = std.debug;
     if (records.items.len == 0) {
         w.print("prof-path: no spans recorded (run with --workers=1)\n", .{});
