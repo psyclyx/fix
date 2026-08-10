@@ -50,7 +50,7 @@ pub fn build(b: *std.Build) void {
     const debug_checks_opt = b.option(bool, "debug-checks", "Enable VM dispatch invariant assertions (defaults to Debug builds)");
     const vm_trace = b.option(bool, "vm-trace", "Enable VM execution tracing (--vm-trace)") orelse false;
     const thunks_log = b.option(bool, "thunks-log", "Enable per-thunk lifecycle event log (--thunks-log)") orelse false;
-    const prof_main = b.option(bool, "prof-main", "Time main thread's hot serial paths via rdtsc; print via --stats") orelse false;
+    const prof_main = b.option(bool, "prof-main", "Time main thread's hot serial paths with the CPU tick counter; print via --stats") orelse false;
     const prof_path = b.option(bool, "prof-path", "Record the force-call tree (workers=1) and report the critical path + source-attributed profile; print via --stats") orelse false;
     if (tsan and (target.result.cpu.arch != .x86_64 or target.result.os.tag != .linux))
         @panic("-Dtsan currently supports only x86_64-linux");
