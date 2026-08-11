@@ -92,6 +92,21 @@ pub fn StableSegments(comptime T: type, comptime params_in: anytype, comptime Vm
         pub const first_segment_size = params.first_segment_size;
         const first_log2: u6 = std.math.log2_int(u32, params.first_segment_size);
 
+        /// Total addressable slots. `segmentCapacity`/`segmentStart` are u32,
+        /// so the geometry tops out where `first_segment_size << segment`
+        /// stops fitting — NOT at `segment_count` (which for the byte store
+        /// nominally allows 28 segments but is unreachable past 16). Past
+        /// that point `segmentCapacity` truncates to 0 and every reservation
+        /// fails with `error.OutOfMemory`, so callers that must collect
+        /// before the store dies need this number, not the segment count.
+        pub const capacity_slots: u32 = blk: {
+            var seg: u32 = 0;
+            while (seg < segment_count and
+                (@as(u64, params.first_segment_size) << @intCast(seg)) <= std.math.maxInt(u32)) : (seg += 1)
+            {}
+            break :blk @intCast((@as(u64, params.first_segment_size) << @intCast(seg)) - params.first_segment_size);
+        };
+
         pub const Range = struct {
             segment: u32,
             offset: u32,
@@ -1187,4 +1202,27 @@ test "flat store: concurrent reserves are race-free" {
         try seen.put(v, {});
     }
     try std.testing.expectEqual(@as(usize, worker_count * per_worker), seen.count());
+}
+
+test "stable segments: capacity_slots is the reachable ceiling, not segment_count" {
+    // `segmentCapacity` computes `first_segment_size << segment` in u32, and
+    // Zig's `<<` truncates silently in every build mode. A store whose
+    // nominal `segment_count` runs past that point can never use the extra
+    // segments: `segmentCapacity` returns 0 there and every reservation
+    // fails with error.OutOfMemory. `capacity_slots` reports where the
+    // geometry actually stops.
+    const Bytes = StableSegments(u8, .{ .first_segment_size = 65536, .segment_count = 28 }, TestVma);
+    // 2^16 * (2^16 - 1): segments 0..15 are usable, 16..27 are unreachable.
+    try std.testing.expectEqual(@as(u32, 4294901760), Bytes.capacity_slots);
+    // Below maxInt(u32) — callers use that value as a sentinel.
+    try std.testing.expect(Bytes.capacity_slots < std.math.maxInt(u32));
+
+    // A store whose segment_count stops before the overflow keeps its
+    // nominal geometry.
+    const Small = StableSegments(u8, .{ .first_segment_size = 65536, .segment_count = 4 }, TestVma);
+    try std.testing.expectEqual(@as(u32, 65536 * 15), Small.capacity_slots);
+
+    // Wider elements hit the u32 id ceiling later (in slots, not bytes).
+    const Vals = StableSegments(u64, .{ .first_segment_size = 8192, .segment_count = 28 }, TestVma);
+    try std.testing.expectEqual(@as(u32, 8192 * ((1 << 19) - 1)), Vals.capacity_slots);
 }

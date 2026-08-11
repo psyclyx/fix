@@ -147,6 +147,7 @@ pub fn enableCollect(heap: *ObjectHeap, budget: u64, step_bytes: u64) void {
     heap.collection.budget_bytes = budget;
     // Collect after fresh reservations cross the configured threshold.
     heap.collection.threshold_bytes = if (step_bytes > 0) heap.totalReservedBytes() + step_bytes else budget;
+    heap.gcArmByteLine();
     // Validation path arms eagerly (bootstrap_end == the arming count, so the
     // pre-arming region is empty), but turn on constrained mode so the always-
     // on transient-root gates are exercised. `armTracking` enables root tracking.
@@ -190,6 +191,7 @@ pub fn enableBudget(heap: *ObjectHeap, budget: u64, root_always: bool) void {
     heap.collection.step_bytes = 0;
     heap.collection.budget_bytes = budget;
     heap.collection.threshold_bytes = armLineBytes(budget);
+    heap.gcArmByteLine();
     heap.collection.bootstrap_end = heap.objects.count();
     heap.collection.root_always = root_always;
     heap.collection.root_active = root_always;
@@ -231,6 +233,7 @@ pub fn armLazy(heap: *ObjectHeap) void {
     const budget = heap.collection.budget_bytes;
     const headroom = std.math.clamp(budget / 8, 64 << 20, ObjectHeap.gc_headroom);
     heap.collection.threshold_bytes = @max(budget, heap.totalReservedBytes() + headroom);
+    heap.gcRaiseByteLine();
 }
 
 /// Run a collection now via the registered callback (the evaluator's
@@ -263,6 +266,7 @@ pub fn afterCollect(heap: *ObjectHeap, live_bytes: u64) void {
         heap.totalReservedBytes() + heap.collection.step_bytes
     else
         @max(budget, heap.totalReservedBytes() + headroom);
+    heap.gcRaiseByteLine();
     heap.gcArmPoolMissCollection();
     // Invalidate all thread-local caches (thunk memo, attr IC, call IC)
     // that key on `token`. Current thunk-memo and attr-cache values were

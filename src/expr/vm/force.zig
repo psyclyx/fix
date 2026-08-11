@@ -1004,6 +1004,16 @@ fn waitForBusyThunk(self: *VM, thunk: *Thunk, thunk_id: types.ObjectId, demand: 
     wait_span.finish(.{});
 }
 
+/// Safepoint for a NATIVE builtin loop. `forceThunkImpl` is otherwise the
+/// only poll site, so a loop that allocates without forcing an unresolved
+/// thunk — `foldl'` over a list the strict fan-out already resolved is the
+/// canonical case — runs to completion with the collection request pending
+/// and the heap growing unbounded. `keep` is the loop-carried value the
+/// collector must see (it may be off the VM stack).
+pub fn pollLoopSafepoint(self: *VM, keep: Value) void {
+    pollForCollection(self, keep, true);
+}
+
 /// Respond to or lead a collection at the force boundary. `thunk_val` may be
 /// off the VM stack, so `gc_roots.extra` keeps it visible while the world stops.
 fn pollForCollection(self: *VM, thunk_val: Value, demand: bool) void {

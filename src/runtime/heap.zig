@@ -182,6 +182,14 @@ const AttrPosStore = segments.StableSegments(AttrPosEntry, .{ .first_segment_siz
 /// physical memory per surviving shard and hide the footprint from RSS.
 const ByteStore = segments.StableSegments(u8, .{ .first_segment_size = byte_chunk_size, .vma_tag = .strbytes }, mem_tag.vma);
 
+/// Where the byte store's own collection line starts, and how far it rises
+/// per collection (see `HeapCollectionState.byte_threshold`). An eighth of
+/// capacity leaves small evals untouched; the step then buys ~28 more
+/// collection cycles before the store's hard ceiling, which is what an
+/// accumulating fold needs to finish inside a 4 GiB id space.
+const byte_line_start: u32 = ByteStore.capacity_slots / 8;
+const byte_line_step: u32 = ByteStore.capacity_slots / 32;
+
 pub var next_heap_token: std.atomic.Value(u64) = .init(1);
 
 pub const ValueRange = ValueStore.Range;
@@ -602,6 +610,15 @@ pub const HeapCollectionState = struct {
     /// mov on x86, TSan-clean).
     collect_requested: std.atomic.Value(bool) = .init(false),
     threshold_bytes: u64 = std.math.maxInt(u64),
+    /// The byte store's own rising collection line, in slots. Its u32 id
+    /// space caps it near 4 GiB — below a RAM-derived `threshold_bytes` on
+    /// any modern box — so a string-heavy eval would otherwise exhaust the
+    /// store with the collector still idle. Kept separate (rather than
+    /// lowering the shared line) so object-heavy evals keep their budget.
+    /// Rises after each collection like `threshold_bytes`: the cursor is
+    /// monotonic, so anchoring to the live set would collect every safepoint.
+    /// Armed only alongside a budget, so `--gc-budget 0` still never collects.
+    byte_threshold: u32 = std.math.maxInt(u32),
     step_bytes: u64 = 0,
     budget_bytes: u64 = 0,
     disable_reuse: bool = false,
@@ -1649,7 +1666,30 @@ pub const ObjectHeap = struct {
     /// (non-moving) collection to run at the next forceThunk safepoint — it marks
     /// live, promotes survivors in place, and frees dead ranges to the free lists.
     inline fn gcCheckThreshold(self: *ObjectHeap) void {
-        if (self.totalReservedBytes() >= self.collection.threshold_bytes) self.collection.collect_requested.store(true, .monotonic);
+        if (self.totalReservedBytes() >= self.collection.threshold_bytes or
+            self.bytes.count() >= self.collection.byte_threshold)
+            self.collection.collect_requested.store(true, .monotonic);
+    }
+
+    /// Raise the byte store's line past the current cursor after a
+    /// collection (or at arming), so one crossing does not re-request a
+    /// collection at every subsequent allocation.
+    pub fn gcRaiseByteLine(self: *ObjectHeap) void {
+        if (self.collection.byte_threshold == std.math.maxInt(u32)) return; // never-collect
+        // Clamp to capacity, do NOT let the saturating add reach
+        // maxInt(u32): that value is the never-collect sentinel, so a
+        // near-ceiling raise would silently disarm the line exactly where
+        // it is the only thing standing between the eval and the wall.
+        // `capacity_slots` is below maxInt by construction, so this holds.
+        self.collection.byte_threshold = @min(
+            ByteStore.capacity_slots,
+            @max(byte_line_start, self.bytes.count() +| byte_line_step),
+        );
+    }
+
+    /// Arm the byte store's line (see `HeapCollectionState.byte_threshold`).
+    pub fn gcArmByteLine(self: *ObjectHeap) void {
+        self.collection.byte_threshold = byte_line_start;
     }
 
     /// Register the collect callback. Fired at

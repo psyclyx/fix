@@ -1,6 +1,7 @@
 const std = @import("std");
 const std_testing = std.testing;
 const renderForTest = @import("../test_helpers.zig").renderForTest;
+const Engine = @import("../../evaluator.zig").Engine;
 
 test "length head and tail reject non-list arguments" {
     try std_testing.expectError(error.TypeError, renderForTest("builtins.length 1"));
@@ -130,4 +131,36 @@ test "foldl' on an empty list returns the seed without calling the operator" {
     const result = try renderForTest("builtins.foldl' (a: b: builtins.throw \"boom\") 5 [ ]");
     defer std_testing.allocator.free(result);
     try std_testing.expectEqualStrings("5", result);
+}
+
+test "an accumulating foldl' reclaims its intermediates" {
+    // Regression (evalbench string_concat / concat_sep_fold, both OutOfMemory):
+    // `builtinFoldlStrict` opened ONE root scope around the whole loop and
+    // called `rootKeep(acc)` per iteration. `rootKeep` only appends, so every
+    // intermediate accumulator stayed a GC root for the entire fold and the
+    // byte store grew as O(n^2) until its u32 id space (~4 GiB) ran out.
+    //
+    // Two more links had to hold for the reclaim to happen at all: the loop
+    // must reach a GC safepoint (the strict fan-out resolves the list up
+    // front, so nothing in the loop enters `forceThunkImpl`), and the byte
+    // store must defend its own ceiling rather than the RAM-derived line
+    // sitting above it.
+    //
+    // 30000 steps of a 1-byte-per-step fold allocate ~560 MB of intermediate
+    // text; only the last 30 KB is live.
+    var ev = try Engine.init(std_testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    ev.configureMemory(4 << 20, null, false); // tiny budget: collect early
+
+    const result = try ev.evaluate(
+        "builtins.stringLength (builtins.foldl' (a: b: a + b) \"\" (builtins.genList (i: \"x\") 30000))",
+    );
+    var out: std.Io.Writer.Allocating = .init(std_testing.allocator);
+    defer out.deinit();
+    try ev.writeValue(&out.writer, result);
+    try std_testing.expectEqualStrings("30000", out.written());
+
+    // ~197 MB reclaiming; 565 MB with the intermediates pinned (identical to
+    // `--gc-budget 0`, since before the fix collection freed none of them).
+    try std_testing.expect(ev.heap.counts().bytes < 400 << 20);
 }
