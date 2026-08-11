@@ -351,12 +351,15 @@ const Parser = struct {
         return self.advance();
     }
 
+    /// Next byte of a bracket expression body.
+    ///
+    /// POSIX ERE: inside `[...]`, `.` `*` `[` and `\` lose their special
+    /// meaning — a backslash is a literal class member, not an escape.
+    /// (Nix `builtins.match` follows this; PCRE-style `[\-]` → only `-`
+    /// would reject systemd unit names that embed `\xNN` escapes, e.g.
+    /// nixpkgs wireguard peer units ending in `\x3d` for base64 `=`.)
     fn classByte(self: *Parser) anyerror!u8 {
         if (self.atEnd()) return error.InvalidRegex;
-        if (self.peek() == '\\') {
-            self.index += 1;
-            return self.escapedByte();
-        }
         return self.advance();
     }
 
@@ -602,4 +605,36 @@ test "regex supports posix classes alternation and search" {
     const hostname = (try hostname_pattern.matchFull(std.testing.allocator, "nixos")).?;
     defer hostname.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("ixos", hostname.captures[0].?);
+}
+
+// POSIX bracket expressions treat `\` as a literal member. The class `[\-]`
+// therefore matches both backslash and hyphen — matching Nix `builtins.match`
+// and the nixpkgs `unitNameType` pattern, which must accept unit names that
+// embed systemd escapes such as `\x3d` for `=`.
+test "regex char class treats backslash as literal (POSIX ERE)" {
+    var slash_hyphen = try Pattern.compile(std.testing.allocator, "[\\-]+");
+    defer slash_hyphen.deinit();
+
+    const only_bs = (try slash_hyphen.matchFull(std.testing.allocator, "\\")).?;
+    defer only_bs.deinit(std.testing.allocator);
+    const only_hyphen = (try slash_hyphen.matchFull(std.testing.allocator, "-")).?;
+    defer only_hyphen.deinit(std.testing.allocator);
+    const both = (try slash_hyphen.matchFull(std.testing.allocator, "\\-\\")).?;
+    defer both.deinit(std.testing.allocator);
+    try std.testing.expect((try slash_hyphen.matchFull(std.testing.allocator, "a")) == null);
+
+    // nixpkgs nixos/lib/systemd-lib.nix unitNameType (pattern text as the
+    // Nix string produces it after `\\` → `\`).
+    const unit_pat = "[a-zA-Z0-9@%:_.\\-]+[.](service|socket|device|mount|automount|swap|target|path|timer|scope|slice)";
+    var unit = try Pattern.compile(std.testing.allocator, unit_pat);
+    defer unit.deinit();
+
+    // Minimal repro: wireguard peer unit with trailing base64 `=` escaped as `\x3d`.
+    const peer = "wireguard-mullvad0-peer-q8TC-ILZWlaydPdkJLkL-pWB8qrK0dWkKtZMGqEElh8\\x3d.service";
+    const peer_match = (try unit.matchFull(std.testing.allocator, peer)).?;
+    defer peer_match.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("service", peer_match.captures[0].?);
+
+    const plain = (try unit.matchFull(std.testing.allocator, "sshd.service")).?;
+    defer plain.deinit(std.testing.allocator);
 }
