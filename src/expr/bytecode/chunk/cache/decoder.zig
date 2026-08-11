@@ -191,11 +191,28 @@ fn remapLoadedField(
     return len;
 }
 
-fn remapLoadedCode(
+/// Rewrite one chunk's unit-local ordinals into real ids and repair its
+/// sorted invariants, in a single walk of the code.
+///
+/// These were two passes. Each decoded every instruction and asked
+/// `opcode.layout` for its operand shape, so the load walked the same
+/// bytecode twice to do work that is instruction-local on both sides. The
+/// repair reads and writes only the instruction it is looking at, plus the
+/// side-table range that instruction names, so merging the walks keeps the
+/// same result. Order within an instruction is preserved: fields are remapped
+/// first, because `attr_bind` sorts its pairs by the remapped name id.
+///
+/// The repair can rewrite the opcode byte (`attrs_new_named_srt` becomes
+/// `attrs_new_named`). That is safe here for the same reason it was safe in a
+/// separate pass: the two opcodes share an operand layout, and the cursor has
+/// already read this instruction's shape.
+fn remapAndFixChunk(
     code: []u8,
     chunk_ids_so_far: []const types.ChunkId,
     strtab: []const types.InternId,
     deferred_ids: []const u32,
+    attr_names: []const types.InternId,
+    attr_pos: []AttrPosEntry,
 ) Error!void {
     var cursor: opcode_mod.InstructionCursor = .{ .code = code };
     while (cursor.next() catch return corruptAt(@src())) |insn| {
@@ -205,6 +222,7 @@ fn remapLoadedCode(
             off += try remapLoadedField(code, op, f, off, chunk_ids_so_far, strtab, deferred_ids);
         }
         std.debug.assert(off == insn.end);
+        try fixSortedInvariantsAt(code, insn.ip, op, attr_names, attr_pos);
     }
 }
 
@@ -220,11 +238,19 @@ fn remapLoadedCode(
 ///     (name, pos) pairs, so each referenced range is re-sorted in place.
 ///   - `attr_bind`'s operand embeds (name, slot) pairs consumed by a sorted
 ///     merge walk; the pairs are self-contained and re-sorted in place.
-fn fixSortedInvariants(code: []u8, attr_names: []const types.InternId, attr_pos: []AttrPosEntry) Error!void {
-    var cursor: opcode_mod.InstructionCursor = .{ .code = code };
-    while (cursor.next() catch return corruptAt(@src())) |insn| {
-        const ip = insn.ip;
-        const op = insn.op;
+/// One instruction's share of the sorted-invariant repair. Every case reads
+/// and writes only this instruction's own operand bytes plus the side-table
+/// range that instruction names, so the repair can share a walk with the id
+/// remap. It runs after that instruction's fields are remapped, because
+/// `attr_bind` sorts its pairs by the remapped name id.
+fn fixSortedInvariantsAt(
+    code: []u8,
+    ip: usize,
+    op: OpCode,
+    attr_names: []const types.InternId,
+    attr_pos: []AttrPosEntry,
+) Error!void {
+    {
         switch (op) {
             .attrs_new_named_srt, .attrs_new_named_pos_srt => {
                 const count = encoding.readU16(code, ip + 1);
@@ -457,8 +483,14 @@ const CommitContext = struct {
         try self.deps.deferred.registerBatch(self.deferred_entries, self.deferred_ids);
         for (self.chunks, 0..) |*chunk, i| {
             const code = @constCast(chunk.code);
-            remapLoadedCode(code, chunk_ids[0..i], self.strtab, self.deferred_ids) catch unreachable;
-            fixSortedInvariants(code, chunk.attr_names, @constCast(chunk.attr_pos)) catch unreachable;
+            remapAndFixChunk(
+                code,
+                chunk_ids[0..i],
+                self.strtab,
+                self.deferred_ids,
+                chunk.attr_names,
+                @constCast(chunk.attr_pos),
+            ) catch unreachable;
             chunk.scheduling.trivial = builder_mod.classifyTrivialBody(
                 chunk.code,
                 chunk.constants,
