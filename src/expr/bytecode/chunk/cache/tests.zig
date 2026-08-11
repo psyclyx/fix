@@ -643,3 +643,58 @@ test "cache load does not allocate for empty chunk side tables" {
     // allocate for real.
     try testing.expect(counting.allocations <= 3 * result.chunk_count);
 }
+
+test "reverse-ordered attrs and pattern binds survive a cache roundtrip" {
+    const allocator = testing.allocator;
+    // Names declared in descending order drive the sorted-invariant fixups on
+    // load: the attrset ops fall back from their `_srt` form, and the pattern
+    // bind pairs are re-sorted in place. Both run in the same walk as the id
+    // remap, so a fusion mistake shows up here.
+    const source =
+        \\let
+        \\  attrs = { zeta = 1; mid = 2; alpha = 3; };
+        \\  pat = { zulu, yankee ? 4, alfa }: zulu + yankee + alfa;
+        \\  nested = { q = { zz = 1; aa = 2; }; b = 3; };
+        \\in [ attrs.alpha attrs.zeta (pat { zulu = 5; alfa = 6; }) nested.q.aa ]
+    ;
+
+    var ev1 = try Engine.init(allocator, .{ .worker_count = 0 });
+    defer ev1.deinit();
+    const top1 = try ev1.compileSource(source, "sorted-roundtrip.nix");
+    var ids = try collectUnit(allocator, &ev1, top1);
+    defer ids.deinit(allocator);
+
+    const bytes = try serialize(allocator, ev1.chunkRegistry(), &ev1.intern, &ev1.heap, &ev1.compilation.deferred_table, .{
+        .source_path = "sorted-roundtrip.nix",
+        .chunk_ids = ids.items,
+        .deferred_ids = &.{},
+    });
+    defer allocator.free(bytes);
+
+    var ev2 = try Engine.init(allocator, .{ .worker_count = 0 });
+    defer ev2.deinit();
+    var ast_arena = ast.AstArena.init(allocator);
+    defer ast_arena.deinit();
+
+    const result = try load(bytes, .{
+        .allocator = ev2.allocator,
+        .registry = &ev2.registry,
+        .intern = &ev2.intern,
+        .heap = &ev2.heap,
+        .deferred = &ev2.compilation.deferred_table,
+        .ast_arena = &ast_arena,
+        .source = source,
+        .base_path = null,
+        .source_path = "sorted-roundtrip.nix",
+        .policy = .{},
+    });
+    try testing.expectEqual(@as(u32, @intCast(ids.items.len)), result.chunk_count);
+
+    var d1 = try disasmChunk(allocator, &ev1, top1);
+    defer d1.deinit(allocator);
+    var d2 = try disasmChunk(allocator, &ev2, result.top);
+    defer d2.deinit(allocator);
+
+    try testing.expectEqual(d1.lines.len, d2.lines.len);
+    for (d1.lines, d2.lines) |a, b| try testing.expectEqualStrings(a.name, b.name);
+}
