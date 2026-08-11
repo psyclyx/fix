@@ -23,7 +23,7 @@ String literal extent-finding lives in `string_syntax`; the [scanner](parsing.md
 
 Three path forms, all emitted as single tokens:
 
-- **Literal path** — `./foo`, `/abs/path`, `../x`. The scanner extends the token with `isPathContinue` over the allowed path bytes — ASCII letters, digits, and `/ . - _ +`; every path literal contains a `/` (the scanner only starts one at `./`, `../`, or a leading `/`).
+- **Literal path** — `./foo`, `/abs/path`, `../x`, and hidden-dir relatives like `.devops/nix/scope.nix`. The scanner matches Nix flex `PATH` (`PATH_CHAR*(\/PATH_CHAR+)+` with `PATH_CHAR = [A-Za-z0-9._+-]`), extended with `isPathContinue` over the allowed path bytes — ASCII letters, digits, and `/ . - _ +`. Every path literal contains a `/`; a bare `.name` without a slash segment is not a path.
 - **Interpolated path** — `./${v}/f`. Despite the embedded `${...}`, this is *one* `path` token: `findInterpolationEnd` skips over the interpolation while continuing the path scan, so the whole thing is a single literal with holes (like a string).
 - **Search path** — `<nixpkgs>`, `<nixpkgs/lib>`. Emitted as a distinct `search_path` token/atom; resolution against the search path happens later. `<` with no closing `>` is not a search path — the scanner backtracks to the bare `less` operator (see [parsing](parsing.md)).
 
