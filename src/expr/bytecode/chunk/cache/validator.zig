@@ -75,7 +75,20 @@ fn boundedRange(start: u32, count: u32, limit: usize) Error!void {
     if (@as(usize, end) > limit) return corruptAt(@src());
 }
 
-fn validateNormalizedCode(
+/// Validate one loaded chunk's code and prove every id it will be rewritten
+/// to still fits its operand width. Read-only: the caller runs this over
+/// every chunk of the unit before it mutates any of them.
+///
+/// These were two walks. `validateUnit` checked the wire form of the code,
+/// and the decoder's preflight then re-walked the same instructions to check
+/// widths. Both are per-field and read-only, so they share one pass. Each arm
+/// validates the index before the width check consumes it, which is what lets
+/// `chunk_ids` and `strtab` be indexed here without a second bounds test.
+///
+/// `chunk_ordinal` keeps a chunk from naming a later one: a unit registers
+/// children before parents, so a `.chunk_id` may only point at an earlier
+/// ordinal.
+pub fn validateAndPreflightCode(
     code: []const u8,
     chunk_ordinal: u32,
     deferred_count: u32,
@@ -84,6 +97,8 @@ fn validateNormalizedCode(
     attr_names_count: u32,
     attr_pos_count: u32,
     capture_bytes_len: u32,
+    chunk_ids: []const types.ChunkId,
+    strtab: []const types.InternId,
 ) Error!void {
     var cursor: opcode_mod.InstructionCursor = .{ .code = code };
     while (cursor.next() catch return corruptAt(@src())) |insn| {
@@ -92,15 +107,25 @@ fn validateNormalizedCode(
             const len = opcode_mod.checkedFieldLen(field, code, off) catch return corruptAt(@src());
             switch (field) {
                 .deferred_id => |w| try validateIndex(readW(code, off, w), deferred_count),
-                .chunk_id => |w| try validateIndex(readW(code, off, w), chunk_ordinal),
-                .intern => |w| try validateIndex(readW(code, off, w), str_count),
+                .chunk_id => |w| {
+                    const ordinal = readW(code, off, w);
+                    try validateIndex(ordinal, chunk_ordinal);
+                    if (w == .b2 and chunk_ids[ordinal] > 0xFFFF) return error.Unfit;
+                },
+                .intern => |w| {
+                    const idx = readW(code, off, w);
+                    try validateIndex(idx, str_count);
+                    if (w == .b2 and strtab[idx] > 0xFFFF) return error.Unfit;
+                },
                 .const_idx => try validateIndex(encoding.readU16(code, off), const_count),
                 .attr_path => |w| {
                     const count = code[off];
                     var p = off + 1;
                     var i: usize = 0;
                     while (i < count) : (i += 1) {
-                        try validateIndex(readW(code, p, w), str_count);
+                        const idx = readW(code, p, w);
+                        try validateIndex(idx, str_count);
+                        if (w == .b2 and strtab[idx] > 0xFFFF) return error.Unfit;
                         p += w.bytes();
                     }
                 },
@@ -109,7 +134,9 @@ fn validateNormalizedCode(
                     var p = off + 4;
                     var i: usize = 0;
                     while (i < count) : (i += 1) {
-                        try validateIndex(readW(code, p, w), str_count);
+                        const idx = readW(code, p, w);
+                        try validateIndex(idx, str_count);
+                        if (w == .b2 and strtab[idx] > 0xFFFF) return error.Unfit;
                         p += w.bytes() + 2;
                     }
                 },
@@ -151,9 +178,15 @@ fn validateNormalizedCode(
     }
 }
 
-/// Complete wire preflight. A checksum-valid but malformed
+/// Wire preflight for everything a decode reads: header, checksum, string and
+/// name tables, scopes, deferred entries, and each chunk's records. The code
+/// bytes are checked separately by `validateAndPreflightCode`, which the
+/// decoder runs once per chunk after decode.
+///
+/// Together the two still hold the guarantee: a checksum-valid but malformed
 /// blob reaches no intern table, heap, name tree, deferred table, AST arena,
-/// or chunk registry mutation.
+/// or chunk registry mutation. Decoding a chunk only copies its code; nothing
+/// interprets those bytes until the code check has passed.
 pub fn validateUnit(allocator: std.mem.Allocator, bytes: []const u8, source_len: usize) Error!void {
     var r: Reader = .{ .bytes = bytes };
     if (!std.mem.eql(u8, try r.bytesN(4), "FIXC")) return corruptAt(@src());
@@ -265,7 +298,10 @@ pub fn validateUnit(allocator: std.mem.Allocator, bytes: []const u8, source_len:
             if (start > end or end > code.len) return corruptAt(@src());
             try validateSpanRecord(&r, str_count);
         }
-        try validateNormalizedCode(code, i, deferred_count, str_count, const_count, attr_names_count, attr_pos_count, capture_len);
+        // The code bytes themselves are checked by `validateAndPreflightCode`,
+        // which the decoder runs over every chunk after decode and before it
+        // mutates anything. Everything a decode reads to get here is checked
+        // above, including the source-map bounds against `code.len`.
     }
     if (r.pos != bytes.len) return corruptAt(@src());
 }

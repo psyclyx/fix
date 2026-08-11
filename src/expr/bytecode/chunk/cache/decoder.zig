@@ -431,43 +431,6 @@ fn decodeChunk(
     return .{ .name = name_id, .chunk = chunk };
 }
 
-fn preflightRemap(code: []const u8, chunk_ids: []const types.ChunkId, strtab: []const types.InternId) Error!void {
-    var cursor: opcode_mod.InstructionCursor = .{ .code = code };
-    while (cursor.next() catch unreachable) |insn| {
-        var off = insn.ip + 1;
-        for (opcode_mod.layout(insn.op)) |field| {
-            switch (field) {
-                .chunk_id => |w| {
-                    const id = chunk_ids[readW(code, off, w)];
-                    if (w == .b2 and id > 0xFFFF) return error.Unfit;
-                },
-                .intern => |w| {
-                    const id = strtab[readW(code, off, w)];
-                    if (w == .b2 and id > 0xFFFF) return error.Unfit;
-                },
-                .attr_path => |w| if (w == .b2) {
-                    var p = off + 1;
-                    var i: usize = 0;
-                    while (i < code[off]) : (i += 1) {
-                        if (strtab[encoding.readU16(code, p)] > 0xFFFF) return error.Unfit;
-                        p += 2;
-                    }
-                },
-                .bind => |w| if (w == .b2) {
-                    var p = off + 4;
-                    var i: usize = 0;
-                    while (i < encoding.readU16(code, off + 2)) : (i += 1) {
-                        if (strtab[encoding.readU16(code, p)] > 0xFFFF) return error.Unfit;
-                        p += 4;
-                    }
-                },
-                .skip, .deferred_id, .const_idx, .slot, .cap1, .count, .jump, .captures, .captures_slot, .mix => {},
-            }
-            off += opcode_mod.fieldLen(field, code, off);
-        }
-    }
-}
-
 const CommitContext = struct {
     deps: LoadDeps,
     chunks: []Chunk,
@@ -479,7 +442,18 @@ const CommitContext = struct {
         const self: *CommitContext = @ptrCast(@alignCast(raw));
         // All possible width failures precede deferred publication. The full
         // wire validator already proved every ordinal and side-table range.
-        for (self.chunks) |chunk| try preflightRemap(chunk.code, chunk_ids, self.strtab);
+        for (self.chunks, 0..) |chunk, i| try validator.validateAndPreflightCode(
+            chunk.code,
+            @intCast(i),
+            @intCast(self.deferred_entries.len),
+            @intCast(self.strtab.len),
+            @intCast(chunk.constants.len),
+            @intCast(chunk.attr_names.len),
+            @intCast(chunk.attr_pos.len),
+            @intCast(chunk.capture_bytes.len),
+            chunk_ids,
+            self.strtab,
+        );
         try self.deps.deferred.registerBatch(self.deferred_entries, self.deferred_ids);
         for (self.chunks, 0..) |*chunk, i| {
             const code = @constCast(chunk.code);
@@ -613,9 +587,14 @@ pub fn load(bytes: []const u8, deps: LoadDeps) Error!LoadResult {
         .deferred_entries = deferred_entries,
         .deferred_ids = new_deferred_ids,
     };
+    // `prepare` is where the code check now runs, so this has to keep the
+    // cache error set intact instead of flattening a malformed blob into
+    // `Uncacheable`. Anything else is a registry failure.
     deps.registry.registerNamedBatch(chunks, names, new_chunk_ids, &commit, CommitContext.prepare) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Unfit => return error.Unfit,
+        error.Corrupt => return error.Corrupt,
+        error.Stale => return error.Stale,
         else => return error.Uncacheable,
     };
     loaded_count = 0;
