@@ -12,7 +12,10 @@ const InternTable = @import("runtime").intern.InternTable;
 
 const event_chunk_len = 256;
 const name_chunk_len = 16 << 10;
-const name_capacity = 16 << 20;
+// Subject labels + counter/span args share one arena. Desktop NixOS timelines
+// burn the old 16 MiB pool in a few seconds (empty `rss_mb` args thereafter).
+// 128 MiB keeps full-system evals labeled without growing on the hot path.
+const name_capacity = 128 << 20;
 const no_chunk = std.math.maxInt(u32);
 const full_chunk = no_chunk - 1;
 
