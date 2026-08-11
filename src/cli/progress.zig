@@ -239,7 +239,9 @@ pub const Session = struct {
             .timeline_path = options.timeline_path,
         };
         if (options.timeline_path != null) {
-            session.timeline = try Timeline.init(allocator, ev.workerCount(), 1 << 21, ev.internTable());
+            // Event budget: 8M slots (~6M primary + ~2M steal flows). Was 2M;
+            // multi-worker NixOS evals filled that and dropped later samples.
+            session.timeline = try Timeline.init(allocator, ev.workerCount(), 1 << 23, ev.internTable());
             session.timeline.?.setFlows(options.timeline_flows);
             session.timeline.?.setSource(source);
             ev.setTraceFlows(options.timeline_flows);
