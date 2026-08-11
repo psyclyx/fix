@@ -12,10 +12,10 @@ const InternTable = @import("runtime").intern.InternTable;
 
 const event_chunk_len = 256;
 const name_chunk_len = 16 << 10;
-// Subject labels + counter/span args share one arena. Desktop NixOS timelines
-// burn the old 16 MiB pool in a few seconds (empty `rss_mb` args thereafter).
-// 128 MiB keeps full-system evals labeled without growing on the hot path.
-const name_capacity = 128 << 20;
+// Subject labels + counter/span args share one arena. Full-system NixOS
+// timelines with many workers still exhaust 128 MiB (hundreds of thousands
+// of dropped_names); 512 MiB is preallocated only when --timeline is on.
+const name_capacity = 512 << 20;
 const no_chunk = std.math.maxInt(u32);
 const full_chunk = no_chunk - 1;
 
@@ -99,8 +99,9 @@ pub const Recorder = struct {
     active: bool = true,
 
     pub fn init(allocator: std.mem.Allocator, worker_count: usize, event_cap: usize, intern: *const InternTable) !Recorder {
-        // Protect 3/4 for primary events; compact flows use the remaining 1/4.
-        const flow_cap = event_cap / 4;
+        // Half of the budget for steal-flow arrows: multi-worker NixOS evals
+        // generate millions of steals and used to drop >1M flows with a 1/4 split.
+        const flow_cap = event_cap / 2;
         const primary_cap = event_cap - flow_cap;
         const worker_event_cap = chunkedPrefix(primary_cap, event_chunk_len);
 
