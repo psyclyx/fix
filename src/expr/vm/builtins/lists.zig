@@ -382,13 +382,26 @@ pub fn builtinSort(self: *VM, cmp_arg: Value, list_arg: Value) !Value {
     const sorted = try self.allocator.dupe(Value, items);
     defer self.allocator.free(sorted);
 
-    var i: usize = 1;
-    while (i < sorted.len) : (i += 1) {
-        var j = i;
-        while (j > 0 and try callComparator(self, cmp, sorted[j], sorted[j - 1])) : (j -= 1) {
-            std.mem.swap(Value, &sorted[j], &sorted[j - 1]);
+    // Block sort: O(n log n) comparisons, O(1) scratch, and stable — Nix's
+    // `sort` is `std::stable_sort`, so equal elements keep their input order.
+    // Its comparator cannot fail, so the first comparator error is parked in
+    // `ctx` and rethrown; later comparisons short-circuit without user code.
+    const Ctx = struct {
+        vm: *VM,
+        cmp: Value,
+        err: ?anyerror = null,
+
+        fn lessThan(ctx: *@This(), left: Value, right: Value) bool {
+            if (ctx.err != null) return false;
+            return callComparator(ctx.vm, ctx.cmp, left, right) catch |err| {
+                ctx.err = err;
+                return false;
+            };
         }
-    }
+    };
+    var ctx: Ctx = .{ .vm = self, .cmp = cmp };
+    std.mem.sort(Value, sorted, &ctx, Ctx.lessThan);
+    if (ctx.err) |err| return err;
 
     return Value.list(try self.heap.addList(sorted));
 }
