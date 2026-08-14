@@ -118,9 +118,6 @@ pub const Act = enum {
     path,
     uri,
     search_path,
-    bool_true,
-    bool_false,
-    null_lit,
     parens,
     attrset_from_brace, // brace used as an expression → attribute set
     rec_attr_set, // rec { Binds }
@@ -234,9 +231,9 @@ const productions = [_]Production{
     .{ .lhs = .expr_simple, .rhs = &.{t(.path)}, .act = .path },
     .{ .lhs = .expr_simple, .rhs = &.{t(.uri)}, .act = .uri },
     .{ .lhs = .expr_simple, .rhs = &.{t(.search_path)}, .act = .search_path },
-    .{ .lhs = .expr_simple, .rhs = &.{t(.kw_true)}, .act = .bool_true },
-    .{ .lhs = .expr_simple, .rhs = &.{t(.kw_false)}, .act = .bool_false },
-    .{ .lhs = .expr_simple, .rhs = &.{t(.kw_null)}, .act = .null_lit },
+    // `true`/`false`/`null` are not listed here — they are base-env variables,
+    // so they arrive as `.identifier` and the parser retags them (see
+    // `ast.keywordLiteralTag`).
     .{ .lhs = .expr_simple, .rhs = &.{ t(.left_paren), n(.expr), t(.right_paren) }, .act = .parens },
     .{ .lhs = .expr_simple, .rhs = &.{n(.brace)}, .act = .attrset_from_brace },
     .{ .lhs = .expr_simple, .rhs = &.{ t(.kw_rec), t(.left_brace), n(.binds), t(.right_brace) }, .act = .rec_attr_set },
@@ -252,9 +249,6 @@ const productions = [_]Production{
     .{ .lhs = .attr, .rhs = &.{t(.identifier)}, .act = .attr_static },
     .{ .lhs = .attr, .rhs = &.{t(.string)}, .act = .attr_static },
     .{ .lhs = .attr, .rhs = &.{t(.kw_or)}, .act = .attr_static },
-    .{ .lhs = .attr, .rhs = &.{t(.kw_true)}, .act = .attr_static },
-    .{ .lhs = .attr, .rhs = &.{t(.kw_false)}, .act = .attr_static },
-    .{ .lhs = .attr, .rhs = &.{t(.kw_null)}, .act = .attr_static },
     .{ .lhs = .attr, .rhs = &.{ t(.dollar_curly), n(.expr), t(.right_brace) }, .act = .attr_dynamic },
 
     // brace: the unified `{ ... }` body
@@ -290,9 +284,6 @@ const productions = [_]Production{
     .{ .lhs = .inherit_names, .rhs = &.{ n(.inherit_names), t(.identifier) }, .act = .inherit_names_append },
     .{ .lhs = .inherit_names, .rhs = &.{ n(.inherit_names), t(.kw_or) }, .act = .inherit_names_append },
     .{ .lhs = .inherit_names, .rhs = &.{ n(.inherit_names), t(.string) }, .act = .inherit_names_append },
-    .{ .lhs = .inherit_names, .rhs = &.{ n(.inherit_names), t(.kw_true) }, .act = .inherit_names_append },
-    .{ .lhs = .inherit_names, .rhs = &.{ n(.inherit_names), t(.kw_false) }, .act = .inherit_names_append },
-    .{ .lhs = .inherit_names, .rhs = &.{ n(.inherit_names), t(.kw_null) }, .act = .inherit_names_append },
 
     // List
     .{ .lhs = .list_items, .rhs = &.{}, .act = .list_items_empty },

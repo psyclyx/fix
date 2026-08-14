@@ -49,7 +49,7 @@ pub fn writeLine(w: *std.Io.Writer, line: []const u8, options: Options) !void {
         const end = @min(token.offset +| token.len, line.len);
         if (end <= last) break;
         if (start > last) try writeSpan(w, line, last, start, null, selected, options.breakpoints, options.color_depth);
-        try writeSpan(w, line, start, end, tokenColor(token.type), selected, options.breakpoints, options.color_depth);
+        try writeSpan(w, line, start, end, tokenColor(token.type, line[start..end]), selected, options.breakpoints, options.color_depth);
         last = end;
     }
     if (last < line.len) try writeSpan(w, line, last, line.len, null, selected, options.breakpoints, options.color_depth);
@@ -123,9 +123,12 @@ fn writeSafe(w: *std.Io.Writer, text: []const u8) !void {
     };
 }
 
-fn tokenColor(token: TokenType) ?terminal_color.Rgb {
+fn tokenColor(token: TokenType, text: []const u8) ?terminal_color.Rgb {
     return switch (token) {
-        .kw_if, .kw_then, .kw_else, .kw_assert, .kw_with, .kw_let, .kw_in, .kw_rec, .kw_inherit, .kw_or, .kw_true, .kw_false, .kw_null => col_keyword,
+        .kw_if, .kw_then, .kw_else, .kw_assert, .kw_with, .kw_let, .kw_in, .kw_rec, .kw_inherit, .kw_or => col_keyword,
+        // `true`/`false`/`null` lex as identifiers (they are base-env
+        // variables, not keywords), but still read as keywords to a human.
+        .identifier => if (syntax.ast.keywordLiteralTag(text) != null) col_keyword else null,
         .string, .path, .search_path => col_string,
         .integer, .float_val => col_number,
         else => null,

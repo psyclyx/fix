@@ -539,6 +539,20 @@ fn cloneHasAttrMixedSegments(arena: *AstArena, segments: []const Node.HasAttrMix
     return cloned;
 }
 
+/// The literal node `true`, `false` or `null` stands for, or null for any other
+/// identifier. Nix binds the three in the base environment rather than reserving
+/// them, so they lex as identifiers and only *become* literals once nothing is
+/// known to bind the name — a judgement the parser makes per file
+/// (`Parser.parse`) and the compiler makes per use, from the live scope.
+pub fn keywordLiteralTag(text: []const u8) ?NodeTag {
+    const eql = std.mem.eql;
+    return switch (text.len) {
+        4 => if (eql(u8, text, "true")) .bool_true else if (eql(u8, text, "null")) .null else null,
+        5 => if (eql(u8, text, "false")) .bool_false else null,
+        else => null,
+    };
+}
+
 pub fn unwrapParens(node: *const Node) *const Node {
     var current = node;
     while (current.tag == .parens) current = current.data.parens;

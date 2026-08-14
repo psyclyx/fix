@@ -1185,3 +1185,81 @@ test "elision: disabled by default" {
         try std.testing.expect(entry.expr.tag != .elided);
     }
 }
+
+// --- `true` / `false` / `null` --------------------------------------------
+// They lex as identifiers (Nix binds them in the base environment, so a binder
+// shadows them), and `parse` retags the unshadowed ones back to literals.
+
+test "parser folds unshadowed true/false/null to literals" {
+    var arena = ast.AstArena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.init(std.testing.allocator, &arena, "[ true false null ]");
+    defer parser.deinit();
+    const node = try parser.parse();
+
+    const items = node.data.list.items;
+    try std.testing.expectEqual(NodeTag.bool_true, items[0].tag);
+    try std.testing.expectEqual(NodeTag.bool_false, items[1].tag);
+    try std.testing.expectEqual(NodeTag.null, items[2].tag);
+}
+
+test "parser leaves true/false/null as identifiers when the file binds one" {
+    var arena = ast.AstArena.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // A binder anywhere disables the fold for the whole file — `null` here is
+    // still the base-env constant, but it must resolve through the scope chain.
+    var parser = Parser.init(std.testing.allocator, &arena, "let true = 1; in [ true null ]");
+    defer parser.deinit();
+    const node = try parser.parse();
+
+    const items = node.data.let_in.body.data.list.items;
+    try std.testing.expectEqual(NodeTag.identifier, items[0].tag);
+    try std.testing.expectEqual(NodeTag.identifier, items[1].tag);
+}
+
+test "parser accepts true/false/null in every binding position" {
+    const sources = [_][]const u8{
+        "true: true",
+        "{ null ? 3 }: null",
+        "{ false }: false",
+        "let true = 1; in true",
+        "rec { null = 1; x = null; }",
+        "{ inherit true false null; }",
+        "x.true",
+    };
+    for (sources) |src| {
+        var arena = ast.AstArena.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = Parser.init(std.testing.allocator, &arena, src);
+        defer parser.deinit();
+        _ = parser.parse() catch |err| {
+            std.debug.print("failed to parse: {s}\n", .{src});
+            return err;
+        };
+    }
+}
+
+test "elision: a shadowing binder forces an eager reparse" {
+    // An elided body is sub-parsed later from its own span alone, where the
+    // enclosing `let true = …` is invisible — so the fold would wrongly fire
+    // there. `parse` reparses without elision instead.
+    const a = std.testing.allocator;
+    const body = "callPackage some.long.attr.path { config = { allowUnfree = true; enableParallelBuilding = true; }; overrides = old: old; }";
+    const inner = try elisionSource(a, body);
+    defer a.free(inner);
+    const src = try std.fmt.allocPrint(a, "let true = 1; in {s}", .{inner});
+    defer a.free(src);
+
+    var arena = ast.AstArena.init(a);
+    defer arena.deinit();
+    var parser = Parser.init(a, &arena, src);
+    defer parser.deinit();
+    parser.elide_bodies = true;
+    const root = try parser.parse();
+
+    for (root.data.let_in.body.data.attr_set.entries) |entry| {
+        try std.testing.expect(entry.expr.tag != .elided);
+    }
+}

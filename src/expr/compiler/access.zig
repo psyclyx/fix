@@ -451,6 +451,22 @@ fn compileRawIdent(self: *Compiler, node: *const Node) !bool {
         try emit.emitOpU16(self, .up_grab, slot);
         return true;
     }
+    // `true`/`false`/`null` reach the compiler as identifiers only when the
+    // file also *binds* one of the three names, which turns off the parser's
+    // whole-file fold (see `Parser.parse`). Nothing lexical claims this use, so
+    // it is still the base-env constant — emit it as one, so it binds directly
+    // like the literal it stands for instead of becoming a `<CODE>` thunk.
+    // Under `scopedImport` the supplied set replaces the base env, so no.
+    if (!self.scoped_base) {
+        if (ast.keywordLiteralTag(span)) |tag| {
+            try emit.emitOp(self, switch (tag) {
+                .bool_true => .push_true,
+                .bool_false => .push_false,
+                else => .push_null,
+            });
+            return true;
+        }
+    }
     return false;
 }
 

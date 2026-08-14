@@ -100,6 +100,12 @@ All notable changes to `fix` are documented in this file.
 
 ### Fixed
 
+- `true`, `false` and `null` are variables bound in the base environment, not
+  reserved words, matching Nix. A binder shadows them (`let true = 1; in true`
+  is `1`) and they are legal in every binding position — `(true: true) 5` is
+  `5`, `({ null ? 3 }: null) { }` is `3` — where they previously lexed as
+  keywords and produced a parse error. Unshadowed uses still compile to
+  literals, so nothing else changes.
 - A `let` whose bindings had an eager-elision-eligible RHS chain could
   false-blackhole with `RecursiveThunk` when an earlier binding transitively
   forced a not-yet-initialized later one (`let l = r + 1; p = l + 2; r = 5 +

@@ -194,6 +194,18 @@ pub const Parser = struct {
     /// errors (an unforced body's errors are never reported).
     elide_bodies: bool = false,
 
+    /// Expression-position uses of `true`/`false`/`null`, which lex as plain
+    /// identifiers because Nix binds them in the base environment rather than
+    /// reserving them. Unless the file binds one of the three names, `parse`
+    /// retags these nodes to `.bool_true`/`.bool_false`/`.null` so every
+    /// constant path downstream keeps seeing a literal. Arena-allocated: it
+    /// points into the tree and dies with it.
+    keyword_literal_refs: std.ArrayListUnmanaged(*Node) = .empty,
+    /// Set when a binder (or attribute) named `true`/`false`/`null` is parsed.
+    /// Deliberately over-approximate — an attribute *name* is not a binder, but
+    /// treating it as one only costs the retag above.
+    keyword_literal_bound: bool = false,
+
     /// Gate tunables for body-span elision. Mirror the lazy per-attr
     /// compilation gates (`compiler/deferred_table.zig` min_body_bytes /
     /// min_entries — cross-checked there at comptime): an elided body is
@@ -216,6 +228,29 @@ pub const Parser = struct {
     pub fn deinit(self: *Parser) void {
         self.diagnostics.deinit(self.allocator);
         self.warnings.deinit(self.allocator);
+    }
+
+    // ---- `true` / `false` / `null` ----
+
+    /// An identifier in a binding position (`x:`, `{ x }:`, `x = …`, `inherit x`).
+    /// Naming one of the three constants means a lexical binder may shadow it,
+    /// so no use in this file may be folded to a literal.
+    fn noteBinder(self: *Parser, tok: Token) void {
+        var text = self.span(tok);
+        // A quoted attribute name binds exactly like a bare one
+        // (`let "true" = 1; in true` is `1`). Only the three literal spellings
+        // can match, so an interpolated name never reaches the comparison.
+        if (std.mem.startsWith(u8, text, "''") and std.mem.endsWith(u8, text[2..], "''")) {
+            text = text[2 .. text.len - 2];
+        } else if (text.len >= 2 and text[0] == '"' and text[text.len - 1] == '"') {
+            text = text[1 .. text.len - 1];
+        }
+        if (ast.keywordLiteralTag(text) != null) self.keyword_literal_bound = true;
+    }
+
+    fn formalName(self: *Parser, tok: Token) Node.Atom {
+        self.noteBinder(tok);
+        return .{ .offset = tok.offset, .len = tok.len };
     }
 
     fn noteWarning(self: *Parser, kind: DeprecationWarning.Kind, tok: Token) !void {
@@ -390,7 +425,26 @@ pub const Parser = struct {
         }
 
         if (self.had_error) return error.ParseError;
-        return root orelse error.ParseError;
+        const top = root orelse return error.ParseError;
+
+        if (!self.keyword_literal_bound) {
+            // Nothing in this file binds `true`/`false`/`null`, so every use is
+            // the base-env constant: fold them back into literal nodes.
+            for (self.keyword_literal_refs.items) |node| {
+                node.tag = ast.keywordLiteralTag(self.atomText(node.data.atom)).?;
+            }
+            return top;
+        }
+        if (!self.elide_bodies) return top;
+
+        // A binder is in play, so uses stay variables — but an elided body is
+        // sub-parsed later from its own span alone and would not see that
+        // binder. Reparse eagerly; only these (vanishingly rare) files pay.
+        var eager = Parser.init(self.allocator, self.arena, self.source);
+        const reparsed = eager.parse();
+        self.deinit();
+        self.* = eager;
+        return reparsed;
     }
 
     // ---- the shift/reduce driver ----
@@ -722,6 +776,7 @@ pub const Parser = struct {
             // ---- Expr (function level) ----
             .lambda_id => {
                 const name = rhs[0].tok;
+                self.noteBinder(name);
                 return .{ .node = try self.arena.createNode(.lambda, .{ .lambda = .{
                     .param_offset = name.offset,
                     .param_len = name.len,
@@ -731,10 +786,12 @@ pub const Parser = struct {
             .lambda_no_bind => return self.buildLambda(rhs[0].brace, null, rhs[2].node),
             .lambda_bind_before => {
                 const bind = rhs[0].tok;
+                self.noteBinder(bind);
                 return self.buildLambda(rhs[2].brace, .{ .offset = bind.offset, .len = bind.len }, rhs[4].node);
             },
             .lambda_bind_after => {
                 const bind = rhs[2].tok;
+                self.noteBinder(bind);
                 return self.buildLambda(rhs[0].brace, .{ .offset = bind.offset, .len = bind.len }, rhs[4].node);
             },
             .assert_ => return .{ .node = try self.arena.createNode(.assert, .{ .assert = .{
@@ -825,7 +882,14 @@ pub const Parser = struct {
             },
 
             // ---- atoms ----
-            .ident => return self.atom(.identifier, rhs[0].tok),
+            .ident => {
+                const value = try self.atom(.identifier, rhs[0].tok);
+                // Record `true`/`false`/`null` for `parse`'s retag pass.
+                if (ast.keywordLiteralTag(self.span(rhs[0].tok)) != null) {
+                    try self.keyword_literal_refs.append(self.arenaAllocator(), value.node);
+                }
+                return value;
+            },
             .integer => return self.atom(.integer, rhs[0].tok),
             .float_val => return self.atom(.float_val, rhs[0].tok),
             .string => return self.atom(.string, rhs[0].tok),
@@ -842,13 +906,6 @@ pub const Parser = struct {
             },
             .uri => return self.atom(.uri, rhs[0].tok),
             .search_path => return self.atom(.search_path, rhs[0].tok),
-            // Real token atoms (not {0,0} placeholders): a zero offset would
-            // poison every ancestor's combined span back to file offset 0 —
-            // and make an elided body's sub-parse (whose offsets are
-            // corrected) disagree with the eager parse.
-            .bool_true => return self.atom(.bool_true, rhs[0].tok),
-            .bool_false => return self.atom(.bool_false, rhs[0].tok),
-            .null_lit => return self.atom(.null, rhs[0].tok),
             .parens => return .{ .node = try self.arena.createNode(.parens, .{ .parens = rhs[1].node }) },
             .attrset_from_brace => return self.buildAttrSet(rhs[0].brace),
             .rec_attr_set => return self.buildRecursiveAttrSet(rhs),
@@ -875,6 +932,7 @@ pub const Parser = struct {
                 // `or` used as an attribute name (`let or = 1;`, `x.or`) is the
                 // deprecated `or`-as-identifier syntax.
                 if (rhs[0].tok.type == .kw_or) try self.noteWarning(.or_as_identifier, rhs[0].tok);
+                self.noteBinder(rhs[0].tok);
                 return .{ .seg = .{ .static = .{ .offset = rhs[0].tok.offset, .len = rhs[0].tok.len } } };
             },
             .attr_dynamic => return .{ .seg = .{ .dynamic = rhs[1].node } },
@@ -903,11 +961,11 @@ pub const Parser = struct {
                 return .{ .clauses = list };
             },
             .tclause_formal_comma => return .{ .clause = .{ .formal = .{
-                .name = .{ .offset = rhs[0].tok.offset, .len = rhs[0].tok.len },
+                .name = self.formalName(rhs[0].tok),
                 .default = null,
             } } },
             .tclause_formal_default_comma => return .{ .clause = .{ .formal = .{
-                .name = .{ .offset = rhs[0].tok.offset, .len = rhs[0].tok.len },
+                .name = self.formalName(rhs[0].tok),
                 .default = rhs[2].node,
             } } },
             .tclause_bind => {
@@ -918,11 +976,11 @@ pub const Parser = struct {
             .tclause_inherit => return .{ .clause = .{ .inherit = try self.inheritEntries(null, rhs[1].names, rhs[0].tok) } },
             .tclause_inherit_from => return .{ .clause = .{ .inherit = try self.inheritEntries(rhs[2].node, rhs[4].names, rhs[0].tok) } },
             .fclause_formal => return .{ .clause = .{ .formal = .{
-                .name = .{ .offset = rhs[0].tok.offset, .len = rhs[0].tok.len },
+                .name = self.formalName(rhs[0].tok),
                 .default = null,
             } } },
             .fclause_formal_default => return .{ .clause = .{ .formal = .{
-                .name = .{ .offset = rhs[0].tok.offset, .len = rhs[0].tok.len },
+                .name = self.formalName(rhs[0].tok),
                 .default = rhs[2].node,
             } } },
             .fclause_ellipsis => return .{ .clause = .ellipsis },
@@ -956,6 +1014,7 @@ pub const Parser = struct {
             .inherit_names_empty => return .{ .names = .empty },
             .inherit_names_append => {
                 var names = rhs[0].names;
+                self.noteBinder(rhs[1].tok);
                 try names.append(a, .{ .offset = rhs[1].tok.offset, .len = rhs[1].tok.len });
                 return .{ .names = names };
             },

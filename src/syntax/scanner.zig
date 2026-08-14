@@ -478,13 +478,18 @@ pub const Scanner = struct {
     // Keyword lookup: dispatch on length (a jump table) then compare the few
     // candidates of that length. Non-keyword identifiers — the common case —
     // fall straight through, and long identifiers match no length bucket at all.
+    //
+    // `true`, `false` and `null` are deliberately absent: Nix binds them in the
+    // base environment like any other global, so a binder shadows them
+    // (`let true = 1; in true` is `1`) and they are legal formals
+    // (`(true: true) 5` is `5`). They lex as identifiers; the parser retags the
+    // unshadowed ones back to literal nodes (see `ast.keywordLiteralTag`).
     fn keywordType(s: []const u8) TokenType {
         const eql = std.mem.eql;
         return switch (s.len) {
             2 => if (eql(u8, s, "if")) .kw_if else if (eql(u8, s, "in")) .kw_in else if (eql(u8, s, "or")) .kw_or else .identifier,
             3 => if (eql(u8, s, "let")) .kw_let else if (eql(u8, s, "rec")) .kw_rec else .identifier,
-            4 => if (eql(u8, s, "then")) .kw_then else if (eql(u8, s, "else")) .kw_else else if (eql(u8, s, "with")) .kw_with else if (eql(u8, s, "true")) .kw_true else if (eql(u8, s, "null")) .kw_null else .identifier,
-            5 => if (eql(u8, s, "false")) .kw_false else .identifier,
+            4 => if (eql(u8, s, "then")) .kw_then else if (eql(u8, s, "else")) .kw_else else if (eql(u8, s, "with")) .kw_with else .identifier,
             6 => if (eql(u8, s, "assert")) .kw_assert else .identifier,
             7 => if (eql(u8, s, "inherit")) .kw_inherit else .identifier,
             else => .identifier,
@@ -495,11 +500,11 @@ pub const Scanner = struct {
 test "scanner recognizes boolean operator tokens" {
     var scanner = Scanner.init("true && false || true ++ []");
 
-    try std.testing.expectEqual(TokenType.kw_true, scanner.next().type);
+    try std.testing.expectEqual(TokenType.identifier, scanner.next().type);
     try std.testing.expectEqual(TokenType.amp_amp, scanner.next().type);
-    try std.testing.expectEqual(TokenType.kw_false, scanner.next().type);
+    try std.testing.expectEqual(TokenType.identifier, scanner.next().type);
     try std.testing.expectEqual(TokenType.pipe_pipe, scanner.next().type);
-    try std.testing.expectEqual(TokenType.kw_true, scanner.next().type);
+    try std.testing.expectEqual(TokenType.identifier, scanner.next().type);
     try std.testing.expectEqual(TokenType.double_plus, scanner.next().type);
     try std.testing.expectEqual(TokenType.left_bracket, scanner.next().type);
     try std.testing.expectEqual(TokenType.right_bracket, scanner.next().type);

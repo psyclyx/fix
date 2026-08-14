@@ -59,9 +59,6 @@ pub const TokenType = enum(u8) {
     kw_rec,
     kw_inherit,
     kw_or,
-    kw_true,
-    kw_false,
-    kw_null,
 
     // ---- special ----
     error_token,
