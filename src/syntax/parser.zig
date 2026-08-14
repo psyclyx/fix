@@ -204,6 +204,12 @@ pub const Parser = struct {
     /// Set when a binder (or attribute) named `true`/`false`/`null` is parsed.
     /// Deliberately over-approximate — an attribute *name* is not a binder, but
     /// treating it as one only costs the retag above.
+    ///
+    /// The retag is sound only for a whole-file parse: a caller sub-parsing one
+    /// span (`compiler/literals.zig` — an elided body, a `${…}` interpolation)
+    /// cannot see an enclosing binder, so it sets this before `parse` to keep
+    /// the uses variables. The compiler then re-decides per use from the live
+    /// scope (`compiler/access.zig compileRawIdent`).
     keyword_literal_bound: bool = false,
 
     /// Gate tunables for body-span elision. Mirror the lazy per-attr
@@ -433,18 +439,8 @@ pub const Parser = struct {
             for (self.keyword_literal_refs.items) |node| {
                 node.tag = ast.keywordLiteralTag(self.atomText(node.data.atom)).?;
             }
-            return top;
         }
-        if (!self.elide_bodies) return top;
-
-        // A binder is in play, so uses stay variables — but an elided body is
-        // sub-parsed later from its own span alone and would not see that
-        // binder. Reparse eagerly; only these (vanishingly rare) files pay.
-        var eager = Parser.init(self.allocator, self.arena, self.source);
-        const reparsed = eager.parse();
-        self.deinit();
-        self.* = eager;
-        return reparsed;
+        return top;
     }
 
     // ---- the shift/reduce driver ----

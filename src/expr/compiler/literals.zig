@@ -188,6 +188,10 @@ pub fn materializeElided(self: *Compiler, node: *const Node) anyerror!*Node {
     const body_source = self.source[atom.offset .. atom.offset + atom.len];
     var parser = parser_mod.Parser.init(self.allocator, arena, body_source);
     defer parser.deinit();
+    // An enclosing `let true = …` is invisible from this span alone, so the
+    // parser must not fold `true`/`false`/`null` here; the compiler decides
+    // per use from the live scope instead (`access.zig compileRawIdent`).
+    parser.keyword_literal_bound = true;
     const expr = parser.parse() catch |err| {
         try diagnostics.absorbParserDiagnostics(self, parser.diagnostics.items, atom.offset);
         return err;
@@ -208,6 +212,7 @@ pub fn compileInterpolatedExpr(self: *Compiler, expr_source: []const u8, source_
 
     var parser = parser_mod.Parser.init(self.allocator, &arena, expr_source);
     defer parser.deinit();
+    parser.keyword_literal_bound = true; // as in `materializeElided`
     const expr = parser.parse() catch |err| {
         try diagnostics.absorbParserDiagnostics(self, parser.diagnostics.items, source_offset);
         return err;

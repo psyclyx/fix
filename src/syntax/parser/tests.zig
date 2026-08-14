@@ -1241,25 +1241,19 @@ test "parser accepts true/false/null in every binding position" {
     }
 }
 
-test "elision: a shadowing binder forces an eager reparse" {
-    // An elided body is sub-parsed later from its own span alone, where the
-    // enclosing `let true = …` is invisible — so the fold would wrongly fire
-    // there. `parse` reparses without elision instead.
-    const a = std.testing.allocator;
-    const body = "callPackage some.long.attr.path { config = { allowUnfree = true; enableParallelBuilding = true; }; overrides = old: old; }";
-    const inner = try elisionSource(a, body);
-    defer a.free(inner);
-    const src = try std.fmt.allocPrint(a, "let true = 1; in {s}", .{inner});
-    defer a.free(src);
-
-    var arena = ast.AstArena.init(a);
+test "keyword_literal_bound suppresses the fold for a sub-parse" {
+    // A sub-parsed span (an elided body, a `${…}` interpolation) cannot see an
+    // enclosing `let true = …`, so its caller sets the flag and the uses stay
+    // identifiers for the compiler to resolve against the live scope.
+    var arena = ast.AstArena.init(std.testing.allocator);
     defer arena.deinit();
-    var parser = Parser.init(a, &arena, src);
-    defer parser.deinit();
-    parser.elide_bodies = true;
-    const root = try parser.parse();
 
-    for (root.data.let_in.body.data.attr_set.entries) |entry| {
-        try std.testing.expect(entry.expr.tag != .elided);
-    }
+    var parser = Parser.init(std.testing.allocator, &arena, "[ true null ]");
+    defer parser.deinit();
+    parser.keyword_literal_bound = true;
+    const node = try parser.parse();
+
+    const items = node.data.list.items;
+    try std.testing.expectEqual(NodeTag.identifier, items[0].tag);
+    try std.testing.expectEqual(NodeTag.identifier, items[1].tag);
 }

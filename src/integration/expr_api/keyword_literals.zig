@@ -28,6 +28,11 @@ test "end-to-end: a binder shadows true/false/null" {
 
     // `with` never beats the base environment (nor a lexical binding).
     try std.testing.expect((try ev.evaluate("with { true = 9; }; true")).isBool());
+
+    // A `${…}` interpolation is sub-parsed from its own span, where the binder
+    // is invisible — it must still resolve to the binding, not the constant.
+    const interpolated = try ev.evaluate("let null = \"N\"; in \"${null}\"");
+    try std.testing.expectEqualStrings("N", (try ev.stringValue(interpolated)).?);
 }
 
 test "end-to-end: unshadowed true/false/null are the base-env constants" {
