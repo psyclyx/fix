@@ -129,7 +129,11 @@ pub fn builtinPath(self: *VM, arg: Value) !Value {
     // attrset via outPath/__toString, e.g. a flake input) through the
     // non-copying string coercion.
     const path_like = try vm_strings.stringLikeValue(self, try self.heap.getAttrValue(attrs_id, path_id));
-    const path = try vm_strings.stringBytes(self, path_like);
+    // `stringBytes` only borrows: a `__toString` result is a fresh heap string
+    // whose slice dies at the next GC safepoint, and the attr forces and user
+    // `filter` calls below are safepoints. Intern to own it for the rest of
+    // the function; the store path this becomes is interned downstream anyway.
+    const path = self.intern.get(try self.intern.intern(try vm_strings.stringBytes(self, path_like)));
     if (!std.fs.path.isAbsolute(path)) return error.RelativePath;
 
     const name_value = try optionalAttr(self, attrs_id, "name");
