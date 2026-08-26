@@ -66,6 +66,11 @@ pub const OpCode = enum(u8) {
 
     // ---- logical ----
     bool_not,
+    /// Force top of stack and require it to be a Boolean, leaving the forced
+    /// Boolean in place. `&&`/`||`/`->` compile the taken branch's operand
+    /// into the expression's result slot, so without this the right operand
+    /// escapes the type check the jump gives the left one.
+    bool_check,
 
     // ---- control flow ----
     /// Relative jump forward (operand: 4-byte unsigned offset).
@@ -472,7 +477,7 @@ fn cnt(comptime w: Width, comptime noun: []const u8) Operand {
 pub fn layout(op: OpCode) []const Operand {
     return switch (op) {
         // No operands.
-        .push_null, .push_true, .push_false, .pop, .int_add, .int_sub, .int_mul, .int_div, .int_neg, .flt_add, .flt_sub, .flt_mul, .flt_div, .cmp_eq, .cmp_ne, .cmp_lt, .cmp_le, .cmp_gt, .cmp_ge, .cmp_eq_null, .cmp_ne_null, .bool_not, .fail, .attrs_merge, .attrs_merge_strict, .list_cat, .push_builtins, .attr_get_dyn, .attr_get_dyn_or, .call, .call_tail, .cell_new, .thunk_shell, .ret, .halt, .breakpoint => comptime &[_]Operand{},
+        .push_null, .push_true, .push_false, .pop, .int_add, .int_sub, .int_mul, .int_div, .int_neg, .flt_add, .flt_sub, .flt_mul, .flt_div, .cmp_eq, .cmp_ne, .cmp_lt, .cmp_le, .cmp_gt, .cmp_ge, .cmp_eq_null, .cmp_ne_null, .bool_not, .bool_check, .fail, .attrs_merge, .attrs_merge_strict, .list_cat, .push_builtins, .attr_get_dyn, .attr_get_dyn_or, .call, .call_tail, .cell_new, .thunk_shell, .ret, .halt, .breakpoint => comptime &[_]Operand{},
 
         .push_const, .push_const_ret => comptime &[_]Operand{.const_idx},
 

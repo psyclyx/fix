@@ -416,6 +416,7 @@ fn compileAnd(self: *Compiler, left: *const Node, right: *const Node) !void {
     try emit.emitOp(self, .pop);
 
     try self.compileNode(right);
+    try emit.emitOp(self, .bool_check);
     emit.patchJump(self, end_jump, self.builder.code.items.len);
 }
 
@@ -432,6 +433,7 @@ fn compileOr(self: *Compiler, left: *const Node, right: *const Node) !void {
     try emit.emitOp(self, .pop);
 
     try self.compileNode(right);
+    try emit.emitOp(self, .bool_check);
     emit.patchJump(self, end_jump, self.builder.code.items.len);
 }
 
@@ -443,6 +445,7 @@ fn compileImpl(self: *Compiler, left: *const Node, right: *const Node) !void {
     try emit.emitOp(self, .pop);
 
     try self.compileNode(right);
+    try emit.emitOp(self, .bool_check);
     const end_jump = self.builder.code.items.len;
     try emit.emitOpU32(self, .jump, 0);
 

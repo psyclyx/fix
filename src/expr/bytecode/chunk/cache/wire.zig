@@ -10,7 +10,7 @@ const registry = @import("../registry.zig");
 const deferred_table = @import("../../../compiler/deferred_table.zig");
 const LanguagePolicy = @import("../../../policy.zig").LanguagePolicy;
 
-pub const format_version: u32 = 5;
+pub const format_version: u32 = 6;
 pub const checksum_start = 8;
 pub const checksum_end = 16;
 pub const checksum_seed: u64 = 0xF17C_CACE_B10B;
