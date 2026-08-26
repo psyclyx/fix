@@ -151,6 +151,11 @@ pub const BuiltinId = enum(u16) {
     /// eval, or raises `RestrictedInPureEval` under pure eval. Seeded as a thunk
     /// so the check happens on the forcing VM's policy. Arg: (constant value).
     pure_guarded = 114,
+    /// Internal: raise the shallow-history error on force. Backs `revCount`
+    /// when the repository's history is truncated but `shallow = true` was not
+    /// passed, so the error surfaces only if `revCount` is used, as in Nix.
+    /// Arg: (repository url). See fetch.zig.
+    shallow_rev_count = 115,
 };
 
 /// Public spelling for an id, or null for an evaluator-internal continuation.
@@ -166,6 +171,7 @@ pub fn publicName(id: BuiltinId) ?[]const u8 {
         .resolve_flake_node,
         .compute_nar_hash,
         .pure_guarded,
+        .shallow_rev_count,
         => null,
         .foldlStrict => "foldl'",
         .break_ => "break",
@@ -356,6 +362,7 @@ pub fn arity(id: BuiltinId) u8 {
         .ceil,
         .baseNameOf,
         .dirOf,
+        .shallow_rev_count,
         => 1,
         .hasAttr,
         .getAttr,
