@@ -283,6 +283,15 @@ fn writeXmlValue(
     context: ?*std.ArrayListUnmanaged(heap_mod.AttrEntry),
     mode: XmlMode,
 ) anyerror!void {
+    // A cyclic value (`let x = { a = x; }; in x`) has no other bound: the walk
+    // below recurses on the native stack and the writer keeps producing output,
+    // so `--xml` runs until the stack faults or the disk fills. Bound it by call
+    // depth rather than a `seen` set — Nix bounds the same shape that way, and a
+    // `seen` set would also collapse legitimate sharing, where a DAG's repeated
+    // subtree must render once per occurrence.
+    try vm_strings.coercionEnter(self);
+    defer vm_strings.coercionExit(self);
+
     const maybe_forced = switch (mode) {
         .strict => try vm_force.forceValue(self, value),
         .lazy => try xmlVisibleValue(self, value),

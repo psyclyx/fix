@@ -324,6 +324,40 @@ test "toXML escapes exactly the characters Nix escapes" {
     try std.testing.expect(std.mem.indexOf(u8, name, "<attr name=\\\"a&lt;b\\\">") != null);
 }
 
+// The XML writer recurses on the native stack and streams as it goes, so a
+// cyclic value used to fault (`builtins.toXML`) or write output forever
+// (`--xml`). Each level now counts against max-call-depth, as Nix bounds it.
+test "a cyclic value errors instead of rendering XML forever" {
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    ev.policy.max_call_depth = 64;
+
+    try std.testing.expectError(
+        error.CallDepthExceeded,
+        ev.evaluate("let x = { a = x; }; in builtins.toXML x"),
+    );
+
+    // The lazy `--xml` renderer walks the same writer and needs the same bound.
+    const cyclic_list = try ev.evaluate("let x = [ x ]; in x");
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try std.testing.expectError(
+        error.CallDepthExceeded,
+        ev.writeXmlValue(&out.writer, cyclic_list),
+    );
+}
+
+// Sharing is not a cycle: a subtree reachable by two paths renders at each of
+// them, so the bound must be on depth rather than on identity.
+test "XML renders shared subtrees once per occurrence" {
+    const xml = try renderForTest("let y = { a = 1; }; in builtins.toXML { p = y; q = y; }");
+    defer std.testing.allocator.free(xml);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        std.mem.count(u8, xml, "<int value=\\\"1\\\" />"),
+    );
+}
+
 test "toXML forces undemanded thunks instead of rendering unevaluated" {
     // lazy_shells_visible wraps eager shapes in resolved-but-UNDEMANDED
     // thunks — the same state speculation leaves behind. builtins.toXML is

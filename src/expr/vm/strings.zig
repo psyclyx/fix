@@ -60,9 +60,10 @@ pub fn concatInternedString(self: *VM, a: InternId, b: InternId) !InternId {
     return id;
 }
 
-/// Enter one nested string-coercion level, counting it against
+/// Enter one nested value-recursion level, counting it against
 /// `max-call-depth` as Nix's `EvalState::coerceToString` does via
-/// `addCallDepth`. Every attrs/list coercion body recurses on the native
+/// `addCallDepth`. Every attrs/list coercion body — and the XML writer's
+/// structural walk, which Nix bounds the same way — recurses on the native
 /// stack, so a self-referential value (`let r = { outPath = r; }`) has no
 /// other bound and would fault. Pair with `coercionExit`; the depth is only
 /// taken on success, so an over-budget caller must not run the exit.
