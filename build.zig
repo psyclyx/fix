@@ -9,7 +9,25 @@ const UnitTest = struct {
     runner: std.Build.Step.Compile.TestRunner,
     timeout: []const u8 = "10m",
     filters: []const []const u8 = &.{},
+    tsan_scc_include: ?std.Build.LazyPath = null,
 };
+
+/// Linux 7.1 dropped `linux/scc.h`, which zig 0.16.0's bundled libtsan still
+/// includes, so `-fsanitize-thread` fails to compile libtsan against glibc
+/// headers (whose `linux/` is a symlink into linux-headers). Supply just that
+/// one header, from zig's own bundled copy, as a system include — the
+/// directory holds nothing else, so no other header is shadowed.
+/// DROP once zig's libtsan no longer includes it.
+fn tsanSccInclude(b: *std.Build, tsan: bool) ?std.Build.LazyPath {
+    if (!tsan) return null;
+    const lib_dir = b.graph.zig_lib_directory.path orelse return null;
+    const wf = b.addWriteFiles();
+    _ = wf.addCopyFile(
+        .{ .cwd_relative = b.pathJoin(&.{ lib_dir, "libc", "include", "any-linux-any", "linux", "scc.h" }) },
+        "linux/scc.h",
+    );
+    return wf.getDirectory();
+}
 
 fn addUnitTest(b: *std.Build, options: UnitTest) *std.Build.Step.Run {
     const compile = b.addTest(.{
@@ -19,6 +37,7 @@ fn addUnitTest(b: *std.Build, options: UnitTest) *std.Build.Step.Run {
         .filters = options.filters,
         .use_llvm = true,
     });
+    if (options.tsan_scc_include) |dir| compile.root_module.addSystemIncludePath(dir);
     compile.setExecCmd(&.{ "timeout", "--kill-after=5s", options.timeout, null });
     return b.addRunArtifact(compile);
 }
@@ -35,6 +54,7 @@ pub fn build(b: *std.Build) void {
     const prof_path = b.option(bool, "prof-path", "Record the force-call tree (workers=1) and report the critical path + source-attributed profile; print via --stats") orelse false;
     if (tsan and (target.result.cpu.arch != .x86_64 or target.result.os.tag != .linux))
         @panic("-Dtsan currently supports only x86_64-linux");
+    const tsan_scc = tsanSccInclude(b, tsan);
     const strip: ?bool = if (profile or tsan) false else null;
     const omit_frame_pointer: ?bool = if (profile or tsan) false else null;
     const debug_checks = debug_checks_opt orelse (optimize == .Debug);
@@ -234,6 +254,7 @@ pub fn build(b: *std.Build) void {
     // auto-invalidates cached bytecode (and identical/reproducible rebuilds
     // keep it valid). Link-step only — no recompilation cost.
     exe.build_id = .sha1;
+    if (tsan_scc) |dir| exe.root_module.addSystemIncludePath(dir);
     b.installArtifact(exe);
 
     const run_step = b.step("run", "Run the app");
@@ -256,24 +277,28 @@ pub fn build(b: *std.Build) void {
         .name = "base-tests",
         .root_module = base_mod,
         .runner = simple_test_runner,
+        .tsan_scc_include = tsan_scc,
     });
 
     const run_runtime_tests = addUnitTest(b, .{
         .name = "runtime-tests",
         .root_module = runtime_mod,
         .runner = simple_test_runner,
+        .tsan_scc_include = tsan_scc,
     });
 
     const run_syntax_tests = addUnitTest(b, .{
         .name = "syntax-tests",
         .root_module = syntax_mod,
         .runner = simple_test_runner,
+        .tsan_scc_include = tsan_scc,
     });
 
     const run_expr_tests = addUnitTest(b, .{
         .name = "expr-tests",
         .root_module = expr_mod,
         .runner = simple_test_runner,
+        .tsan_scc_include = tsan_scc,
     });
 
     // Focused concurrency protocol suite. The tests live beside the modules
@@ -284,6 +309,7 @@ pub fn build(b: *std.Build) void {
         .name = "concurrency-runtime-tests",
         .root_module = runtime_mod,
         .runner = simple_test_runner,
+        .tsan_scc_include = tsan_scc,
         .filters = &.{"concurrency:"},
         .timeout = "2m",
     });
@@ -292,6 +318,7 @@ pub fn build(b: *std.Build) void {
         .name = "concurrency-expr-tests",
         .root_module = expr_mod,
         .runner = simple_test_runner,
+        .tsan_scc_include = tsan_scc,
         .filters = &.{"concurrency:"},
         .timeout = "2m",
     });
@@ -309,24 +336,28 @@ pub fn build(b: *std.Build) void {
         .name = "integration-tests",
         .root_module = integration_test_mod,
         .runner = simple_test_runner,
+        .tsan_scc_include = tsan_scc,
     });
 
     const run_fetchers_tests = addUnitTest(b, .{
         .name = "fetchers-tests",
         .root_module = fetchers_mod,
         .runner = simple_test_runner,
+        .tsan_scc_include = tsan_scc,
     });
 
     const run_store_tests = addUnitTest(b, .{
         .name = "store-tests",
         .root_module = store_mod,
         .runner = simple_test_runner,
+        .tsan_scc_include = tsan_scc,
     });
 
     const run_cli_tests = addUnitTest(b, .{
         .name = "cli-tests",
         .root_module = cli_mod,
         .runner = simple_test_runner,
+        .tsan_scc_include = tsan_scc,
     });
 
     const test_base_step = b.step("test-base", "Run base unit tests");
@@ -356,6 +387,7 @@ pub fn build(b: *std.Build) void {
         .root_module = stress_mod,
         .use_llvm = true,
     });
+    if (tsan_scc) |dir| stress_exe.root_module.addSystemIncludePath(dir);
     const run_stress = b.addSystemCommand(&.{ "timeout", "--kill-after=5s", "10m" });
     run_stress.addArtifactArg(stress_exe);
     run_stress.has_side_effects = true;
