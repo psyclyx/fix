@@ -119,6 +119,23 @@ test "sort partition groupBy and genericClosure on empty inputs" {
     try std_testing.expectEqualStrings("[ ]", closure_empty);
 }
 
+test "sort is stable, orders past the insertion-sort cutoff, and rethrows comparator errors" {
+    const stable = try renderForTest(
+        \\builtins.sort (a: b: a.k < b.k) [ { k = 1; v = 1; } { k = 0; v = 2; } { k = 1; v = 3; } { k = 0; v = 4; } ]
+        \\  == [ { k = 0; v = 2; } { k = 0; v = 4; } { k = 1; v = 1; } { k = 1; v = 3; } ]
+    );
+    defer std_testing.allocator.free(stable);
+    try std_testing.expectEqualStrings("true", stable);
+
+    const big = try renderForTest(
+        "builtins.sort (a: b: a < b) (builtins.genList (i: 63 - i) 64) == builtins.genList (i: i) 64",
+    );
+    defer std_testing.allocator.free(big);
+    try std_testing.expectEqualStrings("true", big);
+
+    try std_testing.expectError(error.NixThrow, renderForTest("builtins.sort (a: b: builtins.throw \"boom\") [ 3 1 2 ]"));
+}
+
 test "sort partition and groupBy reject non-list arguments" {
     try std_testing.expectError(error.TypeError, renderForTest("builtins.sort (a: b: a < b) 1"));
     try std_testing.expectError(error.TypeError, renderForTest("builtins.partition (x: x) 1"));
