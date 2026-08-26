@@ -16,11 +16,12 @@ pub const ProgressPolicy = struct {
     }
 };
 
+/// Every accepted `WHEN` spelling, so argument parsing can recognize the value
+/// set without restating it.
+pub const when_words = std.meta.fieldNames(When);
+
 pub fn parseWhen(text: []const u8) ?When {
-    if (std.mem.eql(u8, text, "auto")) return .auto;
-    if (std.mem.eql(u8, text, "always")) return .always;
-    if (std.mem.eql(u8, text, "never")) return .never;
-    return null;
+    return std.meta.stringToEnum(When, text);
 }
 
 pub fn printHelp(io: std.Io, text: []const u8) void {
