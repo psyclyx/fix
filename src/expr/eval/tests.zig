@@ -13,6 +13,7 @@ test {
     _ = @import("tests/producer_registration.zig");
     _ = @import("tests/builtins.zig");
     _ = @import("tests/derivation.zig");
+    _ = @import("tests/equality.zig");
     _ = @import("tests/diagnostics.zig");
     _ = @import("tests/pipe_operators.zig");
     _ = @import("tests/hashing.zig");
