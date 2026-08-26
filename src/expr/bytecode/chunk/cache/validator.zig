@@ -183,10 +183,18 @@ pub fn validateAndPreflightCode(
 /// bytes are checked separately by `validateAndPreflightCode`, which the
 /// decoder runs once per chunk after decode.
 ///
-/// Together the two still hold the guarantee: a checksum-valid but malformed
-/// blob reaches no intern table, heap, name tree, deferred table, AST arena,
-/// or chunk registry mutation. Decoding a chunk only copies its code; nothing
-/// interprets those bytes until the code check has passed.
+/// What the split still guarantees: malformed code bytes are never
+/// interpreted. Decoding a chunk only copies them, and nothing runs until the
+/// code check has passed.
+///
+/// What it no longer guarantees: keeping a corrupt blob out of the load's
+/// append-only tables. `validateAndPreflightCode` runs in `CommitContext
+/// .prepare`, by which point `load` has already interned strings, built name
+/// tree nodes, adopted deferred scopes, and decoded heap constants. Those are
+/// inert leftovers from a corrupt local cache file rather than a safety
+/// problem — chunk allocations unwind via errdefer and the named batch rolls
+/// its reservation back — but a blob rejected here is not a blob that touched
+/// nothing.
 pub fn validateUnit(allocator: std.mem.Allocator, bytes: []const u8, source_len: usize) Error!void {
     var r: Reader = .{ .bytes = bytes };
     if (!std.mem.eql(u8, try r.bytesN(4), "FIXC")) return corruptAt(@src());

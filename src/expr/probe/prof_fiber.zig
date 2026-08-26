@@ -105,6 +105,15 @@ pub inline fn fiberLiveDec() void {
     _ = fib_live.fetchSub(1, .monotonic);
 }
 
+/// Mean ticks per event, as a fraction. Per-swap fiber costs are tens of
+/// nanoseconds, which is well under one tick of a coarse counter (the aarch64
+/// generic timer runs at ~25 MHz), so an integer mean reads 0 and hides the
+/// cost entirely.
+fn meanTicks(cycles: u64, n: u64) f64 {
+    if (n == 0) return 0;
+    return @as(f64, @floatFromInt(cycles)) / @as(f64, @floatFromInt(n));
+}
+
 /// Fiber cost/benefit census.
 pub fn report() void {
     const f = &fib_totals;
@@ -120,15 +129,15 @@ pub fn report() void {
         );
         const total_over = f.cy_dispatch + f.cy_in + f.cy_out;
         std.debug.print(
-            "prof fibers: cy_dispatch={d} cy_in={d} (n={d} avg={d}) cy_out={d} (n={d} avg={d}) total_overhead_cy={d}\n",
+            "prof fibers: cy_dispatch={d} cy_in={d} (n={d} avg={d:.3}) cy_out={d} (n={d} avg={d:.3}) total_overhead_cy={d}\n",
             .{
                 f.cy_dispatch,
                 f.cy_in,
                 f.n_in,
-                if (f.n_in == 0) 0 else f.cy_in / f.n_in,
+                meanTicks(f.cy_in, f.n_in),
                 f.cy_out,
                 f.n_out,
-                if (f.n_out == 0) 0 else f.cy_out / f.n_out,
+                meanTicks(f.cy_out, f.n_out),
                 total_over,
             },
         );
