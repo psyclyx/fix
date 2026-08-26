@@ -639,16 +639,12 @@ pub fn builtinSplit(self: *VM, regex_arg: Value, text_arg: Value) !Value {
         try out.append(self.allocator, try regexCapturesValue(self, found.captures));
 
         cursor = found.end;
-        search_start = found.end;
-        if (found.start == found.end) {
-            if (cursor >= text.len) {
-                found.deinit(self.allocator);
-                break;
-            }
-            try out.append(self.allocator, try vm_strings.makeString(self, text[cursor .. cursor + 1]));
-            cursor += 1;
-            search_start = cursor;
-        }
+        // A zero-length match must not advance `cursor`, only the next search
+        // position: the character stepped over belongs to the FOLLOWING
+        // separator's prefix. Emitting it as an element of its own would add a
+        // string where the 2n+1 alternation demands a capture list, which every
+        // consumer indexing `split` by parity relies on.
+        search_start = if (found.start == found.end) found.end + 1 else found.end;
         found.deinit(self.allocator);
     }
 

@@ -403,6 +403,50 @@ test "evaluate regex builtins" {
     try std.testing.expectEqualStrings("[ \"abc\" [ ] \"def\" ]", split);
 }
 
+// A zero-length match used to emit the character it stepped over as an element
+// of its own, so the result carried a string where the alternation demands a
+// capture list — one extra element per empty match.
+test "split returns 2n+1 alternating elements even for zero-length matches" {
+    const empty_match = try renderForTest("builtins.split \"(a*)\" \"b\"");
+    defer std.testing.allocator.free(empty_match);
+    try std.testing.expectEqualStrings("[ \"\" [ \"\" ] \"b\" [ \"\" ] \"\" ]", empty_match);
+
+    const mixed = try renderForTest("builtins.split \"(a*)\" \"abc\"");
+    defer std.testing.allocator.free(mixed);
+    try std.testing.expectEqualStrings(
+        "[ \"\" [ \"a\" ] \"\" [ \"\" ] \"b\" [ \"\" ] \"c\" [ \"\" ] \"\" ]",
+        mixed,
+    );
+
+    const empty_pattern = try renderForTest("builtins.split \"\" \"abc\"");
+    defer std.testing.allocator.free(empty_pattern);
+    try std.testing.expectEqualStrings("[ \"\" [ ] \"a\" [ ] \"b\" [ ] \"c\" [ ] \"\" ]", empty_pattern);
+
+    const greedy = try renderForTest("builtins.split \"a*\" \"baac\"");
+    defer std.testing.allocator.free(greedy);
+    try std.testing.expectEqualStrings("[ \"\" [ ] \"b\" [ ] \"\" [ ] \"c\" [ ] \"\" ]", greedy);
+
+    // The shape itself, over patterns that do and do not match empty: an odd
+    // length with strings at even indices and capture lists at odd ones.
+    const invariant = try renderForTest(
+        \\let
+        \\  wellFormed = pattern: subject:
+        \\    let
+        \\      parts = builtins.split pattern subject;
+        \\      n = builtins.length parts;
+        \\      alternates = i:
+        \\        if builtins.bitAnd i 1 == 0
+        \\        then builtins.isString (builtins.elemAt parts i)
+        \\        else builtins.isList (builtins.elemAt parts i);
+        \\    in builtins.bitAnd n 1 == 1 && builtins.all alternates (builtins.genList (i: i) n);
+        \\in builtins.all (p: builtins.all (wellFormed p) [ "" "b" "abc" "baac" "aaa" "xaybz" ]) [
+        \\  "(a*)" "a*" "" "a" "q" "^a" "a$" "(a)(b)?" "(a|)" "[[:digit:]]*"
+        \\]
+    );
+    defer std.testing.allocator.free(invariant);
+    try std.testing.expectEqualStrings("true", invariant);
+}
+
 test "evaluate control and error builtins" {
     var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
     defer ev.deinit();
