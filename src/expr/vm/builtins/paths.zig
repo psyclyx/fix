@@ -125,11 +125,15 @@ pub fn builtinPath(self: *VM, arg: Value) !Value {
     const attrs_id = attrs.asObjectId();
 
     const path_id = try self.intern.intern("path");
-    const path_value = try vm_force.forceValue(self, try self.heap.getAttrValue(attrs_id, path_id));
-    const path = switch (path_value.kind()) {
-        .path, .string, .string_context, .heap_string => try vm_strings.stringBytes(self, path_value),
-        else => return error.TypeError,
-    };
+    // Nix's coerceToPath: paths and strings directly, anything else (an
+    // attrset via outPath/__toString, e.g. a flake input) through the
+    // non-copying string coercion.
+    const path_like = try vm_strings.stringLikeValue(self, try self.heap.getAttrValue(attrs_id, path_id));
+    // `stringBytes` only borrows: a `__toString` result is a fresh heap string
+    // whose slice dies at the next GC safepoint, and the attr forces and user
+    // `filter` calls below are safepoints. Intern to own it for the rest of
+    // the function; the store path this becomes is interned downstream anyway.
+    const path = self.intern.get(try self.intern.intern(try vm_strings.stringBytes(self, path_like)));
     if (!std.fs.path.isAbsolute(path)) return error.RelativePath;
 
     const name_value = try optionalAttr(self, attrs_id, "name");
@@ -137,7 +141,9 @@ pub fn builtinPath(self: *VM, arg: Value) !Value {
     if (!name_value.isNull()) {
         const name = try vm_force.forceValue(self, name_value);
         if (!isPlainString(name)) return error.TypeError;
-        store_name = try vm_strings.stringBytes(self, name);
+        // Interned for the same reason as `path`: this outlives the forces and
+        // filter calls below, and a heap-string slice does not.
+        store_name = self.intern.get(try self.intern.intern(try vm_strings.stringBytes(self, name)));
     }
     // Nix validates the store-path name before touching the filesystem.
     try validateStorePathName(self, store_name);
@@ -162,7 +168,8 @@ pub fn builtinPath(self: *VM, arg: Value) !Value {
     if (!sha_value.isNull()) {
         const value = try vm_force.forceValue(self, sha_value);
         if (!isPlainString(value)) return error.TypeError;
-        expected_hash = try vm_strings.stringBytes(self, value);
+        // Checked after `recursiveIngest`, so it must outlive the filter calls.
+        expected_hash = self.intern.get(try self.intern.intern(try vm_strings.stringBytes(self, value)));
     }
 
     if (!recursive) {
