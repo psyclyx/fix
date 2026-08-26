@@ -191,7 +191,11 @@ pub const Scanner = struct {
             },
             '/' => {
                 if (self.match('/')) return self.makeToken(.double_slash, start, 2);
-                if (isPathContinue(self.peek()) and !isDigit(self.peek())) return self.lexPath(start);
+                // Absolute path (flex `PATH` with an empty leading component):
+                // the first segment is `{PATH_CHAR}+` like every other one, so
+                // it may start with a digit — `/123abc`, `/1/2`. The `/` is
+                // division only when what follows it is not a segment char.
+                if (isPathContinue(self.peek())) return self.lexPath(start);
                 // Absolute path opening with an interpolation: `/${x}`.
                 if (self.peek() == '$' and self.peekAhead(1) == '{') return self.lexPath(start);
                 return self.makeToken(.slash, start, 1);
@@ -648,6 +652,26 @@ test "scanner: ellipsis is not a path unless a slash segment follows" {
     try std.testing.expectEqual(TokenType.path, p.next().type);
     try std.testing.expectEqual(TokenType.path, p.next().type);
     try std.testing.expectEqual(TokenType.eof, p.next().type);
+}
+
+// A digit-leading first component is a normal PATH_CHAR run (`pathWith.nix`
+// in nixpkgs' module tests uses `/123abc`); only whitespace or a non-segment
+// char after the `/` keeps it division.
+test "scanner recognizes digit-leading absolute paths" {
+    var scanner = Scanner.init("/123abc /1/2");
+
+    const t1 = scanner.next();
+    try std.testing.expectEqual(TokenType.path, t1.type);
+    try std.testing.expectEqualStrings("/123abc", scanner.source[t1.offset..][0..t1.len]);
+    const t2 = scanner.next();
+    try std.testing.expectEqual(TokenType.path, t2.type);
+    try std.testing.expectEqualStrings("/1/2", scanner.source[t2.offset..][0..t2.len]);
+    try std.testing.expectEqual(TokenType.eof, scanner.next().type);
+
+    var div = Scanner.init("6 / 2");
+    try std.testing.expectEqual(TokenType.integer, div.next().type);
+    try std.testing.expectEqual(TokenType.slash, div.next().type);
+    try std.testing.expectEqual(TokenType.integer, div.next().type);
 }
 
 test "scanner recognizes interpolated path literals" {
