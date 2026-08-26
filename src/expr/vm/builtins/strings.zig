@@ -360,6 +360,11 @@ pub fn coerceListToStringId(self: *VM, list_id: ObjectId) !InternId {
 }
 
 pub fn coerceListToStringValue(self: *VM, list_id: ObjectId) !Value {
+    // A nested list recurses here just as an attrset does through
+    // `coerceAttrsToStringValue`, so it takes a level too.
+    try vm_strings.coercionEnter(self);
+    defer vm_strings.coercionExit(self);
+
     // GC: `list_id` is a bare id and we force-walk the list (recursively for
     // nested lists/attrs); root the container across the walk.
     const gc_roots = vm_force.rootsBegin(self);
@@ -412,6 +417,9 @@ pub fn isEmptyListStringItem(self: *VM, value: Value) !bool {
 }
 
 pub fn coerceAttrsToStringValue(self: *VM, attrs: Value) !Value {
+    try vm_strings.coercionEnter(self);
+    defer vm_strings.coercionExit(self);
+
     const gc_roots = vm_force.rootsBegin(self);
     defer vm_force.rootsEnd(self, gc_roots);
     vm_force.rootKeep(self, attrs); // held across getAttrValue + callValue + coerce

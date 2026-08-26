@@ -60,6 +60,25 @@ pub fn concatInternedString(self: *VM, a: InternId, b: InternId) !InternId {
     return id;
 }
 
+/// Enter one nested string-coercion level, counting it against
+/// `max-call-depth` as Nix's `EvalState::coerceToString` does via
+/// `addCallDepth`. Every attrs/list coercion body recurses on the native
+/// stack, so a self-referential value (`let r = { outPath = r; }`) has no
+/// other bound and would fault. Pair with `coercionExit`; the depth is only
+/// taken on success, so an over-budget caller must not run the exit.
+pub fn coercionEnter(self: *VM) !void {
+    const ctx = self.executionContext();
+    if (ctx.coerce_depth >= self.policy.max_call_depth) return trace.callDepthExceeded(self);
+    // Native backstop, as in `forceThunkImpl`: a fiber stack too small to
+    // reach the logical limit degrades to an error rather than a fault.
+    if (@frameAddress() < ctx.stack_limit) return trace.stackOverflow(self);
+    ctx.coerce_depth += 1;
+}
+
+pub fn coercionExit(self: *VM) void {
+    self.executionContext().coerce_depth -= 1;
+}
+
 pub fn stringLikeValue(self: *VM, value: Value) !Value {
     const forced = try force.forceValue(self, value);
     return switch (forced.kind()) {
@@ -237,6 +256,9 @@ pub fn isPlainString(value: Value) bool {
 }
 
 pub fn attrsStringLikeValue(self: *VM, attrs: Value) !Value {
+    try coercionEnter(self);
+    defer coercionExit(self);
+
     const gc_roots = force.rootsBegin(self);
     defer force.rootsEnd(self, gc_roots);
     force.rootKeep(self, attrs); // held across getAttrValue + callValue + recurse

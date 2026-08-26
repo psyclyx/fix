@@ -61,6 +61,12 @@ pub const ExecutionContext = struct {
     /// `tryEval` catch depth is fiber state: a nested import VM must still
     /// suppress debugger entry for an exception its caller intends to catch.
     tryeval_depth: u32 = 0,
+    /// Nested string-coercion levels, counted against `max-call-depth` exactly
+    /// as function calls are. The coercion bodies (`__toString` / `outPath` /
+    /// list walks) recurse on the native stack, so a self-referential value
+    /// has no other bound. Fiber state for the same reason as `tryeval_depth`:
+    /// a nested import VM continues its caller's coercion.
+    coerce_depth: u32 = 0,
     /// Head of the in-progress `builtins.scopedImport` path chain. Unlike an
     /// OS-thread-local, this travels with the fiber when work stealing resumes
     /// it on another worker. Frames themselves live on the suspended fiber's
@@ -111,6 +117,7 @@ pub const ExecutionContext = struct {
         // the fiber can finish and return to the recycle list.
         std.debug.assert(self.scoped_import_top == null);
         std.debug.assert(self.tryeval_depth == 0);
+        std.debug.assert(self.coerce_depth == 0);
         self.pending_failure = null;
         self.error_trace = null;
         self.is_demand = false;

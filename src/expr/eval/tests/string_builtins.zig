@@ -44,3 +44,23 @@ test "toString rejects a list containing a non-coercible attrset" {
     defer ev.deinit();
     try std.testing.expectError(error.TypeError, ev.evaluate("builtins.toString [ {} ]"));
 }
+
+// A self-referential coercion used to recurse natively until the fiber stack
+// faulted. Each level now counts against max-call-depth, as in Nix.
+test "a cyclic outPath or __toString coercion errors instead of faulting" {
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    ev.policy.max_call_depth = 128;
+
+    try std.testing.expectError(
+        error.CallDepthExceeded,
+        ev.evaluate("let r = { outPath = r; }; in builtins.toString r"),
+    );
+    try std.testing.expectError(
+        error.CallDepthExceeded,
+        ev.evaluate("let r = { __toString = _: r; }; in builtins.toString r"),
+    );
+    // A finite chain well inside the budget still coerces.
+    const ok = try ev.evaluate("builtins.toString { outPath = { outPath = \"/x\"; }; }");
+    try std.testing.expectEqualStrings("/x", ev.intern.get(ok.asInternId()));
+}
