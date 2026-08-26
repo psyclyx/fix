@@ -11,6 +11,7 @@ pub const GitSpec = struct {
     rev: ?[]const u8 = null,
     ref: ?[]const u8 = null,
     submodules: bool = false,
+    all_refs: bool = false,
 };
 
 pub const UrlSpec = struct {
