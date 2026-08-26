@@ -141,7 +141,9 @@ pub fn builtinPath(self: *VM, arg: Value) !Value {
     if (!name_value.isNull()) {
         const name = try vm_force.forceValue(self, name_value);
         if (!isPlainString(name)) return error.TypeError;
-        store_name = try vm_strings.stringBytes(self, name);
+        // Interned for the same reason as `path`: this outlives the forces and
+        // filter calls below, and a heap-string slice does not.
+        store_name = self.intern.get(try self.intern.intern(try vm_strings.stringBytes(self, name)));
     }
     // Nix validates the store-path name before touching the filesystem.
     try validateStorePathName(self, store_name);
@@ -166,7 +168,8 @@ pub fn builtinPath(self: *VM, arg: Value) !Value {
     if (!sha_value.isNull()) {
         const value = try vm_force.forceValue(self, sha_value);
         if (!isPlainString(value)) return error.TypeError;
-        expected_hash = try vm_strings.stringBytes(self, value);
+        // Checked after `recursiveIngest`, so it must outlive the filter calls.
+        expected_hash = self.intern.get(try self.intern.intern(try vm_strings.stringBytes(self, value)));
     }
 
     if (!recursive) {
