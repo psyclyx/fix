@@ -236,7 +236,11 @@ fn getSourceMode(ev: *Engine, io: std.Io, source: SourceArg, options: args.Sourc
     const allocator = ev.hostAllocator();
     // Load the base source text (borrowed for expr/file, owned for flake).
     var base: Source = switch (source) {
-        .expr => |text| .{ .text = .{ .borrowed = text } },
+        // `-E` text has no file of its own, so its relative path literals
+        // resolve against the working directory, as in Nix. `evaluatePathAt`
+        // takes the base explicitly and treats null as "no base", so leaving
+        // it unset would leave `./foo.txt` unresolved rather than fall back.
+        .expr => |text| .{ .text = .{ .borrowed = text }, .base_path = try fileish.dupBasePath(ev) },
         .file => |path| try fileish.load(ev, io, path),
         .flake => |installable| .{ .text = .{ .owned = try lowerFlakeInstallable(ev, installable, options) } },
     };

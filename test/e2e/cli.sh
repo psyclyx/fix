@@ -45,4 +45,26 @@ t "--color does not swallow a following path" "42" "$out"
 "$FIX" eval --color never -E '1 + 1' >/dev/null 2>&1
 ok_if "--color never exits 0" test "$?" = 0
 
+# --- -E path literals resolve against the working directory ---------------
+# `--expr` has no source file, so its base directory is the cwd (as in Nix).
+# Unresolved literals silently reached readFile, coercion and comparison.
+paths="$(e2e_mktemp)"
+mkdir -p "$paths/sub"
+echo 'hi' >"$paths/sub/foo.txt"
+echo './neighbour.nix' >"$paths/rel.nix"
+
+entry="$PWD"
+cd "$paths/sub" || exit 2
+t "-E resolves ./x against the cwd" "$paths/sub/foo.txt" "$("$FIX" eval -E './foo.txt')"
+t "-E resolves ./." "$paths/sub" "$("$FIX" eval -E './.')"
+t "-E resolves ../x" "$paths/x" "$("$FIX" eval -E '../x')"
+t "-E leaves absolute paths alone" "/tmp/foo.txt" "$("$FIX" eval -E '/tmp/foo.txt')"
+t "-E resolves a path inside interpolation" "-foo.txt" "$("$FIX" eval -E '"${./foo.txt}"')"
+t "-E resolves a path reaching readFile" '"hi\n"' "$("$FIX" eval -E 'builtins.readFile ./foo.txt')"
+t "-E resolves nested path literals" "$paths/sub/foo.txt" "$("$FIX" eval -E '[ ./foo.txt ]')"
+# A FILE input resolves against its own directory, not the cwd -- `rel.nix`
+# sits one level up, so a cwd-based base would give the wrong answer here.
+t "FILE input still resolves against the file" "$paths/neighbour.nix" "$("$FIX" eval ../rel.nix)"
+cd "$entry" || exit 2
+
 e2e_finish
