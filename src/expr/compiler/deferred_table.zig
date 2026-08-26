@@ -273,7 +273,7 @@ pub const Table = struct {
     }
 };
 
-const test_node: ast.Node = .{ .tag = .null, .data = .{ .atom = .{ .offset = 0, .len = 0 } }, .span = null };
+const test_node: ast.Node = .{ .tag = .identifier, .data = .{ .atom = .{ .offset = 0, .len = 0 } }, .span = null };
 
 test "register stores an entry retrievable by its returned id" {
     var table = Table.init(std.testing.allocator);

@@ -43,7 +43,7 @@ const CollectCtx = struct {
 /// a full subtree name set per region.
 pub fn walkReferencedNames(self: *Compiler, node: *const Node, ctx: anytype) void {
     switch (node.tag) {
-        .integer, .float_val, .bool_true, .bool_false, .null, .uri => {},
+        .integer, .float_val, .uri => {},
         // `<name>` desugars to `builtins.findFile __nixPath "name"`, so it
         // references `__nixPath` — a `let __nixPath = …` binding it resolves
         // against must be kept alive by this analysis (else it's dropped as

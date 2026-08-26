@@ -48,7 +48,7 @@ test "parser applies boolean operator precedence" {
     try std.testing.expectEqual(ast.BinaryOp.or_, node.data.binary.op);
     try std.testing.expectEqual(NodeTag.binary_op, node.data.binary.left.tag);
     try std.testing.expectEqual(ast.BinaryOp.and_, node.data.binary.left.data.binary.op);
-    try std.testing.expectEqual(NodeTag.bool_true, node.data.binary.right.tag);
+    try std.testing.expectEqual(NodeTag.identifier, node.data.binary.right.tag);
 }
 
 test "parser treats implication as right associative" {
@@ -76,7 +76,7 @@ test "parser gives implication lower precedence than boolean or" {
     try std.testing.expectEqual(ast.BinaryOp.impl, node.data.binary.op);
     try std.testing.expectEqual(NodeTag.binary_op, node.data.binary.left.tag);
     try std.testing.expectEqual(ast.BinaryOp.or_, node.data.binary.left.data.binary.op);
-    try std.testing.expectEqual(NodeTag.bool_false, node.data.binary.right.tag);
+    try std.testing.expectEqual(NodeTag.identifier, node.data.binary.right.tag);
 }
 
 test "parser desugars |> to a forward-tagged application" {
@@ -621,7 +621,7 @@ test "parser parses assert as a prefix keyword" {
     const node = try parser.parse();
 
     try std.testing.expectEqual(NodeTag.assert, node.tag);
-    try std.testing.expectEqual(NodeTag.bool_true, node.data.assert.cond.tag);
+    try std.testing.expectEqual(NodeTag.identifier, node.data.assert.cond.tag);
     try std.testing.expectEqual(NodeTag.integer, node.data.assert.body.tag);
 }
 
@@ -773,7 +773,7 @@ fn nodeEq(a: *const Node, b: *const Node) bool {
     if (a.tag != b.tag) return false;
     if (!optAtomEq(a.span, b.span)) return false;
     switch (a.tag) {
-        .integer, .float_val, .string, .path, .uri, .search_path, .identifier, .bool_true, .bool_false, .null, .elided => return atomEq(a.data.atom, b.data.atom),
+        .integer, .float_val, .string, .path, .uri, .search_path, .identifier, .elided => return atomEq(a.data.atom, b.data.atom),
         .unary_op => return a.data.unary.op == b.data.unary.op and nodeEq(a.data.unary.expr, b.data.unary.expr),
         .binary_op => return a.data.binary.op == b.data.binary.op and
             nodeEq(a.data.binary.left, b.data.binary.left) and

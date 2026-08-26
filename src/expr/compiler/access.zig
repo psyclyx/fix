@@ -291,7 +291,7 @@ fn compileListElement(self: *Compiler, item: *const Node) !void {
     defer self.name_hint = null;
     const unwrapped = unwrapParens(item);
     switch (unwrapped.tag) {
-        .integer, .float_val, .bool_true, .bool_false, .null, .string, .path, .uri => {
+        .integer, .float_val, .string, .path, .uri => {
             // Pure literals bind directly (interpolated string/path fall
             // through to a thunk, matching `ExprConcatStrings`).
             if (try compileImmediateContainerValue(self, unwrapped, .{})) return;
@@ -300,7 +300,10 @@ fn compileListElement(self: *Compiler, item: *const Node) !void {
         .identifier => {
             // A statically-resolvable variable is `ExprVar::maybeThunk`: bind
             // its slot/upvalue directly (no fresh thunk). Dynamic (`with`) and
-            // builtin names aren't resolvable here, so they thunk instead.
+            // builtin names aren't resolvable here, so they thunk instead —
+            // except the base-env constants, which are values (`[ true ]`
+            // prints `[ true ]`, not `[ <CODE> ]`).
+            if (fold.globalConstant(self, unwrapped)) |g| return emit.emitOp(self, g.op());
             if (try compileRawIdent(self, unwrapped)) return;
             try thunks.compileListElementThunk(self, item);
         },
@@ -343,7 +346,8 @@ pub fn compileContainerValue(self: *Compiler, node: *const Node, options: Contai
 pub fn isLiteralContainerValue(self: *Compiler, node: *const Node) bool {
     const unwrapped = unwrapParens(node);
     return switch (unwrapped.tag) {
-        .integer, .float_val, .bool_true, .bool_false, .null => true,
+        .integer, .float_val => true,
+        .identifier => fold.globalConstant(self, unwrapped) != null,
         .string => !stringHasInterpolation(self, unwrapped),
         .path => !pathHasInterpolation(self, unwrapped),
         .list => unwrapped.data.list.items.len == 0,
@@ -365,9 +369,6 @@ pub fn compileImmediateContainerValue(self: *Compiler, node: *const Node, option
             try literals.compilePath(self, unwrapped);
         },
         .uri => try literals.compileUri(self, unwrapped),
-        .bool_true => try emit.emitOp(self, .push_true),
-        .bool_false => try emit.emitOp(self, .push_false),
-        .null => try emit.emitOp(self, .push_null),
         .list => {
             // A composite value has no single representative chunk; drop any
             // pending name so the element thunks don't claim the binding's name.
@@ -432,6 +433,10 @@ pub fn compileImmediateContainerValue(self: *Compiler, node: *const Node, option
             try emit.emitOp(self, .thunk_shell);
         },
         .identifier => {
+            if (fold.globalConstant(self, unwrapped)) |g| {
+                try emit.emitOp(self, g.op());
+                return true;
+            }
             if (!options.raw_identifier) return false;
             if (!try compileRawIdent(self, unwrapped)) return false;
         },

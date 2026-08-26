@@ -514,13 +514,18 @@ pub const Scanner = struct {
     // Keyword lookup: dispatch on length (a jump table) then compare the few
     // candidates of that length. Non-keyword identifiers — the common case —
     // fall straight through, and long identifiers match no length bucket at all.
+    //
+    // `true`, `false` and `null` are deliberately absent: Nix has no such
+    // keywords, only base-environment variables, so a binder shadows them
+    // (`let true = 1; in true`) and they are legal wherever an identifier is
+    // (`true: true`, `{ null ? 3 }: null`). The compiler folds the unshadowed
+    // ones back to `push_true`/`push_false`/`push_null`.
     fn keywordType(s: []const u8) TokenType {
         const eql = std.mem.eql;
         return switch (s.len) {
             2 => if (eql(u8, s, "if")) .kw_if else if (eql(u8, s, "in")) .kw_in else if (eql(u8, s, "or")) .kw_or else .identifier,
             3 => if (eql(u8, s, "let")) .kw_let else if (eql(u8, s, "rec")) .kw_rec else .identifier,
-            4 => if (eql(u8, s, "then")) .kw_then else if (eql(u8, s, "else")) .kw_else else if (eql(u8, s, "with")) .kw_with else if (eql(u8, s, "true")) .kw_true else if (eql(u8, s, "null")) .kw_null else .identifier,
-            5 => if (eql(u8, s, "false")) .kw_false else .identifier,
+            4 => if (eql(u8, s, "then")) .kw_then else if (eql(u8, s, "else")) .kw_else else if (eql(u8, s, "with")) .kw_with else .identifier,
             6 => if (eql(u8, s, "assert")) .kw_assert else .identifier,
             7 => if (eql(u8, s, "inherit")) .kw_inherit else .identifier,
             else => .identifier,
@@ -531,15 +536,40 @@ pub const Scanner = struct {
 test "scanner recognizes boolean operator tokens" {
     var scanner = Scanner.init("true && false || true ++ []");
 
-    try std.testing.expectEqual(TokenType.kw_true, scanner.next().type);
+    try std.testing.expectEqual(TokenType.identifier, scanner.next().type);
     try std.testing.expectEqual(TokenType.amp_amp, scanner.next().type);
-    try std.testing.expectEqual(TokenType.kw_false, scanner.next().type);
+    try std.testing.expectEqual(TokenType.identifier, scanner.next().type);
     try std.testing.expectEqual(TokenType.pipe_pipe, scanner.next().type);
-    try std.testing.expectEqual(TokenType.kw_true, scanner.next().type);
+    try std.testing.expectEqual(TokenType.identifier, scanner.next().type);
     try std.testing.expectEqual(TokenType.double_plus, scanner.next().type);
     try std.testing.expectEqual(TokenType.left_bracket, scanner.next().type);
     try std.testing.expectEqual(TokenType.right_bracket, scanner.next().type);
     try std.testing.expectEqual(TokenType.eof, scanner.next().type);
+}
+
+// Nix has no `true`/`false`/`null` keywords — they are base-environment
+// variables — so the scanner must hand them over as plain identifiers. A
+// keyword token here made them unshadowable (`let true = 1; in true`) and
+// illegal in binder positions (`true: true`).
+test "scanner lexes true, false and null as identifiers" {
+    var scanner = Scanner.init("let true = 1; in true");
+
+    try std.testing.expectEqual(TokenType.kw_let, scanner.next().type);
+    const bound = scanner.next();
+    try std.testing.expectEqual(TokenType.identifier, bound.type);
+    try std.testing.expectEqualStrings("true", scanner.source[bound.offset..][0..bound.len]);
+    try std.testing.expectEqual(TokenType.equal, scanner.next().type);
+    try std.testing.expectEqual(TokenType.integer, scanner.next().type);
+    try std.testing.expectEqual(TokenType.semicolon, scanner.next().type);
+    try std.testing.expectEqual(TokenType.kw_in, scanner.next().type);
+    try std.testing.expectEqual(TokenType.identifier, scanner.next().type);
+    try std.testing.expectEqual(TokenType.eof, scanner.next().type);
+
+    // Binder positions the keyword tokens could never reach.
+    var lambda = Scanner.init("null: false");
+    try std.testing.expectEqual(TokenType.identifier, lambda.next().type);
+    try std.testing.expectEqual(TokenType.colon, lambda.next().type);
+    try std.testing.expectEqual(TokenType.identifier, lambda.next().type);
 }
 
 test "scanner recognizes pipe operator tokens" {

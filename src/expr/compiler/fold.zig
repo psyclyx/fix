@@ -8,6 +8,7 @@ const std = @import("std");
 const compiler_mod = @import("context.zig");
 const ast = @import("syntax").ast;
 const Value = @import("runtime").value.Value;
+const bytecode = @import("../bytecode.zig");
 const emit = @import("emit.zig");
 const int_ops = @import("runtime").int;
 const heap_mod = @import("runtime").heap;
@@ -63,8 +64,8 @@ pub fn compileBinary(self: *Compiler, node: *const Node) !void {
     // non-null side and use `cmp_eq_null`/`cmp_ne_null` so the runtime
     // sees a type-monomorphic null check.
     if (bin.op == .eq or bin.op == .neq) {
-        const left_null = unwrapParens(bin.left).tag == .null;
-        const right_null = unwrapParens(bin.right).tag == .null;
+        const left_null = isNullConstant(self, bin.left);
+        const right_null = isNullConstant(self, bin.right);
         if (left_null != right_null) {
             try self.compileNode(if (left_null) bin.right else bin.left);
             try emit.emitOp(self, if (bin.op == .eq) .cmp_eq_null else .cmp_ne_null);
@@ -146,9 +147,10 @@ fn tryFoldNode(self: *Compiler, node: *const Node) anyerror!?Value {
             const val = std.fmt.parseFloat(f64, span) catch return null;
             return Value.float(val);
         },
-        .bool_true => return Value.boolVal(true),
-        .bool_false => return Value.boolVal(false),
-        .null => return Value.null_val,
+        .identifier => {
+            const g = globalConstant(self, n) orelse return null;
+            return g.value();
+        },
         .string => return tryFoldString(self, n),
         .path => {
             // Non-interpolated path literals resolve at compile time already
@@ -497,6 +499,70 @@ pub fn overloadNameForBinary(op: BinaryOp) ?[]const u8 {
 /// the same local/ancestor chain as `resolveCaptureId` but WITHOUT its
 /// capture side effect, so a failed probe leaves compiler state untouched and
 /// the non-overloaded path emits a direct arithmetic op.
+/// The three base-environment constants. Nix has no `true`/`false`/`null`
+/// keywords (see `Scanner.keywordType`) — they are ordinary variables — so
+/// they reach the compiler as identifiers and only *look* like literals.
+pub const GlobalConstant = enum {
+    true_lit,
+    false_lit,
+    null_lit,
+
+    pub fn value(self: GlobalConstant) Value {
+        return switch (self) {
+            .true_lit => Value.boolVal(true),
+            .false_lit => Value.boolVal(false),
+            .null_lit => Value.null_val,
+        };
+    }
+
+    pub fn op(self: GlobalConstant) bytecode.OpCode {
+        return switch (self) {
+            .true_lit => .push_true,
+            .false_lit => .push_false,
+            .null_lit => .push_null,
+        };
+    }
+};
+
+/// Which base-environment constant `node` denotes, or null when it denotes
+/// something else. `true`/`false`/`null` are variables, so this is only their
+/// constant when nothing shadows them: a lexical binder does (`let true = 1;`),
+/// a `with` scope never does (it cannot shadow a base-env name), and
+/// `builtins.scopedImport` replaces the base env outright, which rules them
+/// out entirely.
+pub fn globalConstant(self: *const Compiler, node: *const Node) ?GlobalConstant {
+    const n = unwrapParens(node);
+    if (n.tag != .identifier) return null;
+    const name = attr_names.identText(self, n.data.atom);
+    const which: GlobalConstant = if (std.mem.eql(u8, name, "true"))
+        .true_lit
+    else if (std.mem.eql(u8, name, "false"))
+        .false_lit
+    else if (std.mem.eql(u8, name, "null"))
+        .null_lit
+    else
+        return null;
+    if (self.scoped_base or lexicalBindingInScope(self, name)) return null;
+    return which;
+}
+
+fn isNullConstant(self: *const Compiler, node: *const Node) bool {
+    const g = globalConstant(self, node) orelse return false;
+    return g == .null_lit;
+}
+
+/// `overloadBindingInScope` keyed by name — for the base-env constants, whose
+/// spelling is known but whose intern id is not worth materializing on a path
+/// that must not allocate.
+fn lexicalBindingInScope(self: *const Compiler, name: []const u8) bool {
+    if (scope.resolveLocal(self, name)) |_| return true;
+    var p = self.parent;
+    while (p) |parent| : (p = parent.parent) {
+        if (scope.resolveLocal(parent, name)) |_| return true;
+    }
+    return false;
+}
+
 fn overloadBindingInScope(self: *const Compiler, name_id: types.InternId) bool {
     if (scope.resolveLocalId(self, name_id)) |_| return true;
     var p = self.parent;

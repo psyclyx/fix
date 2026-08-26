@@ -39,7 +39,6 @@ Debugger and name-capture sessions bypass the cache in both directions.
 | Node family | Module | Lowers |
 | --- | --- | --- |
 | int / float / string / path / search-path / identifier | `literals` | immediates, interpolation (`str_cat`), path resolution, `id → local`/`upvalue`/`with` |
-| bool / null | (inline) | a single `push_true`/`push_false`/`push_null` op |
 | binary / unary | `fold` | operators; compile-time constant folding |
 | apply / lambda / lambda_attrs | `lambda` | calls, value-lambda uncurrying, attrset-pattern lambdas, `call_n`/`call_tail_n` spine flattening |
 | let | `let` | demand-driven binding placement ([let-float](let-float.md)), binding classification, cell elision, [strict-prefix](strictness.md) eager elision |
@@ -173,7 +172,7 @@ Lambda bodies (`compileLambda` / `compileLambdaAttrs`) enter `compileTailExpress
 
 **control** — `if` emits `jump_false` + a forward `jump` patched at join; `assert` compiles the condition then `jump_false` over the body to a `fail` tail, falling through to the body when the condition holds; `with` compiles the scope subject as a thunk bound to an anonymous frame-local slot, registers that slot on the `with_scopes` chain, compiles the body, then pops the scope.
 
-**literals** — ints box to inline i48 or a `boxed_int` constant; floats route through canonical-NaN `float()`; string interpolation lowers each part (literal chunk vs interpolated sub-expr thunk) and concatenates via `str_cat`; path literals resolve against the compiler's `base_path` at compile time (absolute paths via `std.fs.path.resolve`, relative paths joined onto `base_path`); `__curPos` lowers to a `{ file; line; column; }` attrset built at the current source position (or `push_null` when the unit has no `source_path`). An identifier resolves in order **local slot → upvalue capture → the literal `builtins` → ambient builtin → `with` lookup**, emitting `loc_get` / `up_get` / `push_builtins` / (a `builtin` constant or `push_builtins` + `attr_get`) / `with_lookup`; an unresolved name is a compile error (see [scopes.md](scopes.md)).
+**literals** — ints box to inline i48 or a `boxed_int` constant; floats route through canonical-NaN `float()`; string interpolation lowers each part (literal chunk vs interpolated sub-expr thunk) and concatenates via `str_cat`; path literals resolve against the compiler's `base_path` at compile time (absolute paths via `std.fs.path.resolve`, relative paths joined onto `base_path`); `__curPos` lowers to a `{ file; line; column; }` attrset built at the current source position (or `push_null` when the unit has no `source_path`). An identifier resolves in order **local slot → upvalue capture → the base-env constants (`true`/`false`/`null`) → the literal `builtins` → ambient builtin → `with` lookup**, emitting `loc_get` / `up_get` / `push_true`/`push_false`/`push_null` / `push_builtins` / (a `builtin` constant or `push_builtins` + `attr_get`) / `with_lookup`; an unresolved name is a compile error (see [scopes.md](scopes.md)).
 
 ## Diagnostics
 

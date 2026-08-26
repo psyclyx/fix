@@ -16,6 +16,7 @@ const types = @import("runtime").types;
 const Value = @import("runtime").value.Value;
 const OpCode = bytecode.OpCode;
 const emit = @import("emit.zig");
+const fold = @import("fold.zig");
 const attr_names = @import("attr_names.zig");
 const scope = @import("scope.zig");
 const diagnostics = @import("diagnostics.zig");
@@ -352,6 +353,12 @@ pub fn compileIdent(self: *Compiler, node: *const Node) !void {
         // from the scope raises `undefined variable` at runtime, matching Nix's
         // "the supplied set is the whole environment" semantic.
         return;
+    } else if (fold.globalConstant(self, node)) |g| {
+        // `true`/`false`/`null` reach here as unshadowed base-env variables:
+        // push the constant instead of going through `builtins.<name>` like
+        // the other constant bindings below. Ordered above `emitWithLookup`
+        // because a `with` cannot shadow a base-env name.
+        try emit.emitOp(self, g.op());
     } else if (std.mem.eql(u8, span, "builtins")) {
         try emit.emitOp(self, .push_builtins);
     } else if (try emitAmbientBuiltin(self, span)) {

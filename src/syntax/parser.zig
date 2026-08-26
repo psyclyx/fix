@@ -842,13 +842,6 @@ pub const Parser = struct {
             },
             .uri => return self.atom(.uri, rhs[0].tok),
             .search_path => return self.atom(.search_path, rhs[0].tok),
-            // Real token atoms (not {0,0} placeholders): a zero offset would
-            // poison every ancestor's combined span back to file offset 0 —
-            // and make an elided body's sub-parse (whose offsets are
-            // corrected) disagree with the eager parse.
-            .bool_true => return self.atom(.bool_true, rhs[0].tok),
-            .bool_false => return self.atom(.bool_false, rhs[0].tok),
-            .null_lit => return self.atom(.null, rhs[0].tok),
             .parens => return .{ .node = try self.arena.createNode(.parens, .{ .parens = rhs[1].node }) },
             .attrset_from_brace => return self.buildAttrSet(rhs[0].brace),
             .rec_attr_set => return self.buildRecursiveAttrSet(rhs),

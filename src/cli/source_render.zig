@@ -125,7 +125,7 @@ fn writeSafe(w: *std.Io.Writer, text: []const u8) !void {
 
 fn tokenColor(token: TokenType) ?terminal_color.Rgb {
     return switch (token) {
-        .kw_if, .kw_then, .kw_else, .kw_assert, .kw_with, .kw_let, .kw_in, .kw_rec, .kw_inherit, .kw_or, .kw_true, .kw_false, .kw_null => col_keyword,
+        .kw_if, .kw_then, .kw_else, .kw_assert, .kw_with, .kw_let, .kw_in, .kw_rec, .kw_inherit, .kw_or => col_keyword,
         .string, .path, .search_path => col_string,
         .integer, .float_val => col_number,
         else => null,
@@ -135,14 +135,14 @@ fn tokenColor(token: TokenType) ?terminal_color.Rgb {
 test "source cursor preserves token color and dims its surroundings" {
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    try writeLine(&output.writer, "if true then 42", .{
+    try writeLine(&output.writer, "if 42 then x", .{
         .color_depth = .truecolor,
-        .focus = .{ .start = 3, .end = 7 },
+        .focus = .{ .start = 3, .end = 5 },
     });
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "\x1b[38;2;210;143;240m") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "\x1b[2mif") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\x1b[38;2;210;143;240mtrue") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\x1b[2m42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\x1b[38;2;229;192;123m42") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\x1b[2mx") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "\x1b[4m") == null);
 }
 

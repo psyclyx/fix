@@ -524,7 +524,10 @@ fn attrParamsNeedCells(self: *Compiler, params: []const Node.LambdaAttrParam) bo
 fn defaultIsTrivialLiteral(self: *Compiler, default: *const Node) bool {
     const unwrapped = ast.unwrapParens(default);
     return switch (unwrapped.tag) {
-        .integer, .float_val, .bool_true, .bool_false, .null => true,
+        .integer, .float_val => true,
+        // `true`/`false`/`null` are unshadowed base-env variables here, which
+        // Nix's `ExprVar::maybeThunk` binds as the value they denote.
+        .identifier => fold.globalConstant(self, unwrapped) != null,
         .string, .path => blk: {
             // Interpolated forms are `ExprConcatStrings` — not literals.
             const atom = unwrapped.data.atom;
