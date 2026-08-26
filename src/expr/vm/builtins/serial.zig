@@ -466,13 +466,19 @@ fn writeXmlIndent(writer: *std.Io.Writer, depth: usize) !void {
     for (0..depth) |_| try writer.writeAll("  ");
 }
 
+/// Exactly Nix's `XMLWriter` escape set, byte for byte — `toXML` output is a
+/// string value programs diff and hash, so parity outranks XML hygiene here.
+/// Notably `'` stays literal (attributes are always `"`-delimited), while a
+/// newline becomes a character reference because an XML parser would otherwise
+/// normalise it to a space inside an attribute. Tab and CR are left raw despite
+/// suffering the same normalisation; Nix does not escape them either.
 fn writeXmlEscaped(writer: *std.Io.Writer, text: []const u8) !void {
     for (text) |c| switch (c) {
         '&' => try writer.writeAll("&amp;"),
         '<' => try writer.writeAll("&lt;"),
         '>' => try writer.writeAll("&gt;"),
         '"' => try writer.writeAll("&quot;"),
-        '\'' => try writer.writeAll("&apos;"),
+        '\n' => try writer.writeAll("&#xA;"),
         else => try writer.writeByte(c),
     };
 }

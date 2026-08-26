@@ -295,6 +295,35 @@ test "evaluate XML builtin" {
     try std.testing.expectEqualStrings("\"dev,out\"", xml_preserves_string_context);
 }
 
+// `toXML` output is a string programs diff and hash, so its escape set must be
+// Nix's, not XML's: `'` stays literal, a newline becomes `&#xA;` because an XML
+// parser normalises a raw one to a space inside an attribute, and tab/CR stay
+// raw even though they suffer that same normalisation. (Regression: a grub
+// config evaluated differently for want of the newline escape.)
+test "toXML escapes exactly the characters Nix escapes" {
+    const quoteish = try renderForTest("builtins.toXML \"a'b\\\"c&d<e>f\"");
+    defer std.testing.allocator.free(quoteish);
+    try std.testing.expect(std.mem.indexOf(u8, quoteish, "a'b&quot;c&amp;d&lt;e&gt;f") != null);
+
+    const newline = try renderForTest("builtins.toXML \"a\\nb\"");
+    defer std.testing.allocator.free(newline);
+    try std.testing.expect(std.mem.indexOf(u8, newline, "value=\\\"a&#xA;b\\\"") != null);
+
+    // Tab and CR reach the attribute unescaped, and nothing else is touched.
+    const raw = try renderForTest("builtins.toXML \"a\\tb\\rc\"");
+    defer std.testing.allocator.free(raw);
+    try std.testing.expect(std.mem.indexOf(u8, raw, "value=\\\"a\\tb\\rc\\\"") != null);
+
+    const plain = try renderForTest("builtins.toXML \"nothing special\"");
+    defer std.testing.allocator.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "value=\\\"nothing special\\\"") != null);
+
+    // Attribute names go through the same escaper.
+    const name = try renderForTest("builtins.toXML { \"a<b\" = 1; }");
+    defer std.testing.allocator.free(name);
+    try std.testing.expect(std.mem.indexOf(u8, name, "<attr name=\\\"a&lt;b\\\">") != null);
+}
+
 test "toXML forces undemanded thunks instead of rendering unevaluated" {
     // lazy_shells_visible wraps eager shapes in resolved-but-UNDEMANDED
     // thunks — the same state speculation leaves behind. builtins.toXML is
