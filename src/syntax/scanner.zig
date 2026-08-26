@@ -124,7 +124,14 @@ pub const Scanner = struct {
         if (isDigit(c)) return self.lexNumber(start);
         if (c == '"') return self.lexString(start, .double_quoted);
         if (c == '\'' and self.peek() == '\'') return self.lexString(start, .indented);
-        if (c == '.' and (self.peek() == '/' or (self.peek() == '.' and self.peekAhead(1) == '/'))) return self.lexPath(start);
+        // Relative path starting with `.` — Nix flex PATH form
+        // `{PATH_CHAR}*(\/{PATH_CHAR}+)+`, where PATH_CHAR is
+        // `[A-Za-z0-9._+-]` (no slash). Covers `./foo`, `../bar`, hidden
+        // dirs like `.devops/nix/scope.nix` (llama.cpp's flake), `.../x`,
+        // and `.5/foo` (path outranks a leading-dot float when a `/`
+        // segment follows). Bare `.devops` or `...` without a `/` segment
+        // is not a path.
+        if (c == '.' and self.looksLikeRelativePath()) return self.lexPath(start);
         // Leading-dot float: `.5`, `.5e3` (Nix's `0?\.[0-9]+` form). Deprecated
         // in Lix but still valid; `.` followed by a digit is never a selector
         // here because a bare `.` cannot start a select.
@@ -454,6 +461,28 @@ pub const Scanner = struct {
         return hasClass(c, char_path_continue);
     }
 
+    /// True when the token starting at the already-consumed `.` is a Nix
+    /// relative path (flex `PATH`), not a bare select `.`, ellipsis, or
+    /// leading-dot float. Peek-only: does not advance `self.pos`.
+    ///
+    /// Matches `{PATH_CHAR}*(\/{PATH_CHAR}+)+` with `PATH_CHAR = [A-Za-z0-9._+-]`,
+    /// also allowing `/${` as an interpolated segment opener after the slash.
+    fn looksLikeRelativePath(self: *Scanner) bool {
+        var i = self.pos;
+        // PATH_CHAR* (no slash)
+        while (i < self.source.len and isPathChar(self.source[i])) : (i += 1) {}
+        // Need at least one /PATH_CHAR+ (or /${) segment
+        if (i >= self.source.len or self.source[i] != '/') return false;
+        const c = if (i + 1 < self.source.len) self.source[i + 1] else 0;
+        if (c == '$' and i + 2 < self.source.len and self.source[i + 2] == '{') return true;
+        return c != 0 and isPathChar(c);
+    }
+
+    /// Nix flex `PATH_CHAR`: path segment bytes excluding `/`.
+    fn isPathChar(c: u8) bool {
+        return isAlpha(c) or isDigit(c) or c == '.' or c == '_' or c == '-' or c == '+';
+    }
+
     /// True when `self.pos` sits at a `/` that opens a further path segment,
     /// i.e. the slash abuts a segment char (`[A-Za-z0-9._+-]`, never another
     /// `/`) or a `${` interpolation. After an initial run of path chars — an
@@ -574,6 +603,51 @@ test "scanner recognizes simple path literals" {
     try std.testing.expectEqual(TokenType.path, scanner.next().type);
     try std.testing.expectEqual(TokenType.path, scanner.next().type);
     try std.testing.expectEqual(TokenType.eof, scanner.next().type);
+}
+
+// Hidden-dir relative paths (`.devops/...`) are valid Nix PATH tokens — used
+// by llama.cpp's flake (`callPackage .devops/nix/scope.nix`). Regression for
+// scanners that only started paths at `./` / `../`.
+test "scanner recognizes leading-dot hidden directory paths" {
+    var scanner = Scanner.init(".devops/nix/scope.nix .devops/nix/nixpkgs-instances.nix");
+
+    const t1 = scanner.next();
+    try std.testing.expectEqual(TokenType.path, t1.type);
+    try std.testing.expectEqualStrings(".devops/nix/scope.nix", scanner.source[t1.offset..][0..t1.len]);
+    const t2 = scanner.next();
+    try std.testing.expectEqual(TokenType.path, t2.type);
+    try std.testing.expectEqualStrings(".devops/nix/nixpkgs-instances.nix", scanner.source[t2.offset..][0..t2.len]);
+    try std.testing.expectEqual(TokenType.eof, scanner.next().type);
+}
+
+test "scanner: bare leading-dot name is not a path" {
+    // No `/` segment → not flex PATH; bare `.` then identifier (Nix errors at parse).
+    var scanner = Scanner.init(".devops");
+
+    try std.testing.expectEqual(TokenType.dot, scanner.next().type);
+    try std.testing.expectEqual(TokenType.identifier, scanner.next().type);
+    try std.testing.expectEqual(TokenType.eof, scanner.next().type);
+}
+
+test "scanner: leading-dot float still works; slash promotes to path" {
+    var floats = Scanner.init(".5 .5e3");
+    try std.testing.expectEqual(TokenType.float_val, floats.next().type);
+    try std.testing.expectEqual(TokenType.float_val, floats.next().type);
+    try std.testing.expectEqual(TokenType.eof, floats.next().type);
+
+    var path = Scanner.init(".5/foo");
+    try std.testing.expectEqual(TokenType.path, path.next().type);
+    try std.testing.expectEqual(TokenType.eof, path.next().type);
+}
+
+test "scanner: ellipsis is not a path unless a slash segment follows" {
+    var ell = Scanner.init("... ");
+    try std.testing.expectEqual(TokenType.ellipsis, ell.next().type);
+
+    var p = Scanner.init(".../x ...foo/bar");
+    try std.testing.expectEqual(TokenType.path, p.next().type);
+    try std.testing.expectEqual(TokenType.path, p.next().type);
+    try std.testing.expectEqual(TokenType.eof, p.next().type);
 }
 
 test "scanner recognizes interpolated path literals" {
