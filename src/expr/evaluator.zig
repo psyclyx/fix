@@ -1710,23 +1710,27 @@ pub const Engine = struct {
         defer self.allocator.free(bytes);
 
         var arena = ast_mod.AstArena.init(self.allocator);
-        const result = chunk_cache.load(bytes, .{
-            .allocator = self.allocator,
-            .registry = &self.registry,
-            .intern = &self.intern,
-            .heap = &self.heap,
-            .deferred = &self.compilation.deferred_table,
-            .ast_arena = &arena,
-            .source = source,
-            .base_path = base_path,
-            .source_path = source_path,
-            .policy = self.policy,
-        }) catch |err| {
-            arena.deinit();
-            _ = self.compilation.cache_rejects.fetchAdd(1, .monotonic);
-            if (self.letFloatCensusEnabled())
-                std.debug.print("chunk-cache reject: {s} {s}\n", .{ @errorName(err), source_path orelse "?" });
-            return null;
+        const result = blk: {
+            const clt = prof.start(.chunk_cache_load);
+            defer prof.end(.chunk_cache_load, clt);
+            break :blk chunk_cache.load(bytes, .{
+                .allocator = self.allocator,
+                .registry = &self.registry,
+                .intern = &self.intern,
+                .heap = &self.heap,
+                .deferred = &self.compilation.deferred_table,
+                .ast_arena = &arena,
+                .source = source,
+                .base_path = base_path,
+                .source_path = source_path,
+                .policy = self.policy,
+            }) catch |err| {
+                arena.deinit();
+                _ = self.compilation.cache_rejects.fetchAdd(1, .monotonic);
+                if (self.letFloatCensusEnabled())
+                    std.debug.print("chunk-cache reject: {s} {s}\n", .{ @errorName(err), source_path orelse "?" });
+                return null;
+            };
         };
         // Deferred bodies materialize their synthesized `.elided` nodes from
         // this arena at force time; keep it for the engine's lifetime, same

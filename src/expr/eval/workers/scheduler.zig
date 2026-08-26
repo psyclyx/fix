@@ -26,13 +26,13 @@
 //! (demand-driven) submissions skip the cap.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const types = @import("runtime").types;
 const sync = @import("base").sync;
 const gc = @import("runtime").gc;
 const heap_mod = @import("runtime").heap;
 const containers = @import("base");
 const clock = @import("base").clock;
+const timebase = @import("base").timebase;
 const build_options = @import("build_options");
 pub const Config = @import("scheduler/config.zig").Config;
 const gc_barrier_mod = @import("scheduler/gc_barrier.zig");
@@ -45,11 +45,11 @@ pub const WakeWord = queue.WakeWord;
 
 /// Idle-scan cost census (piggybacks on `-Dprof-main`, like the probes in
 /// `probe/prof.zig` — the scheduler can't import that layer, so the tiny
-/// rdtsc + flush machinery is local). Buckets the cycles each drain-loop
+/// tick + flush machinery is local). Buckets the cycles each drain-loop
 /// probe class burns (own pops vs the O(N) per-peer steal scans over the
 /// ready queues / urgent deques / novel rings / spec rings / cont deques).
 /// Zero-cost when the build flag is off.
-const scan_census_on = build_options.prof_main and builtin.cpu.arch == .x86_64;
+const scan_census_on = build_options.prof_main and timebase.supported;
 
 pub const ScanCensus = struct {
     ready_pop_cy: u64 = 0,
@@ -78,14 +78,7 @@ var scan_totals: ScanCensus = .{};
 
 inline fn rdtscScan() u64 {
     if (comptime !scan_census_on) return 0;
-    var low: u32 = undefined;
-    var high: u32 = undefined;
-    asm volatile ("rdtsc"
-        : [low] "={eax}" (low),
-          [high] "={edx}" (high),
-        :
-        : .{ .memory = true });
-    return (@as(u64, high) << 32) | @as(u64, low);
+    return timebase.read();
 }
 
 inline fn scanEnd(comptime prefix: []const u8, t0: u64, hit: bool) void {
@@ -1592,4 +1585,11 @@ test "parkWorker returns immediately once shutdown is flagged" {
     // No wake pending and shutdown is set — parkWorker must not block
     // waiting for a wake that will never come.
     sched.parkWorker(1);
+}
+
+test "the scan census follows the build flag on every supported arch" {
+    if (!build_options.prof_main) return error.SkipZigTest;
+    if (!timebase.supported) return error.SkipZigTest;
+    try std.testing.expect(scan_census_on);
+    try std.testing.expect(rdtscScan() != 0);
 }

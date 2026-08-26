@@ -256,11 +256,16 @@ pub inline fn recordLongString(len: usize, has_context: bool) void {
 pub fn reportStrConcat() void {
     if (str.concat_calls != 0) {
         std.debug.print(
-            "prof str-concat: calls={d} cycles={d} avg_cy={d} bytes={d} new={d} ({d:.1}%) new_bytes={d}\n",
+            "prof str-concat: calls={d} cycles={d} avg_cy={d:.3} bytes={d} new={d} ({d:.1}%) new_bytes={d}\n",
             .{
-                str.concat_calls,                     str.concat_cycles,
-                str.concat_cycles / str.concat_calls, str.concat_bytes,
-                str.concat_new,                       pct(str.concat_new, str.concat_calls),
+                str.concat_calls,
+                str.concat_cycles,
+                // Fractional: a single concat costs well under one tick of a
+                // coarse counter, so an integer mean reads 0.
+                @as(f64, @floatFromInt(str.concat_cycles)) / @as(f64, @floatFromInt(str.concat_calls)),
+                str.concat_bytes,
+                str.concat_new,
+                pct(str.concat_new, str.concat_calls),
                 str.concat_new_bytes,
             },
         );

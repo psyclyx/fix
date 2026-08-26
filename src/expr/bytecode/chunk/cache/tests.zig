@@ -591,3 +591,110 @@ test "computeKey is stable for identical inputs and varies with codegen policy" 
     const k7 = computeKey("let x = 1; in x", "a.nix", no_named);
     try testing.expect(!std.mem.eql(u8, &k5, &k7));
 }
+
+test "cache load does not allocate for empty chunk side tables" {
+    const allocator = testing.allocator;
+    // Bodies with no captures, no named function arguments and no attr
+    // tables: the side tables that a real unit leaves empty most of the time.
+    const source =
+        \\[ (a: 1) (b: 2) (c: 3) (d: 4) (e: 5) (f: 6) (g: 7) (h: 8) ]
+    ;
+
+    var ev1 = try Engine.init(allocator, .{ .worker_count = 0 });
+    defer ev1.deinit();
+    const top1 = try ev1.compileSource(source, "empty-tables.nix");
+    var ids = try collectUnit(allocator, &ev1, top1);
+    defer ids.deinit(allocator);
+
+    const bytes = try serialize(allocator, ev1.chunkRegistry(), &ev1.intern, &ev1.heap, &ev1.compilation.deferred_table, .{
+        .source_path = "empty-tables.nix",
+        .chunk_ids = ids.items,
+        .deferred_ids = &.{},
+    });
+    defer allocator.free(bytes);
+
+    var ev2 = try Engine.init(allocator, .{ .worker_count = 0 });
+    defer ev2.deinit();
+    var ast_arena = ast.AstArena.init(allocator);
+    defer ast_arena.deinit();
+
+    // Counts what the decoder allocates. The registry keeps its own allocator,
+    // so batch registration stays out of this number.
+    var counting = std.testing.FailingAllocator.init(ev2.allocator, .{});
+    const result = try load(bytes, .{
+        .allocator = counting.allocator(),
+        .registry = &ev2.registry,
+        .intern = &ev2.intern,
+        .heap = &ev2.heap,
+        .deferred = &ev2.compilation.deferred_table,
+        .ast_arena = &ast_arena,
+        .source = source,
+        .base_path = null,
+        .source_path = "empty-tables.nix",
+        .policy = .{},
+    });
+
+    try testing.expect(result.chunk_count >= 8);
+    // `decodeChunk` has eight allocation sites per chunk, but a zero-length
+    // request never reaches the allocator: `Allocator.allocBytesWithAlignment`
+    // returns a dangling aligned pointer for a zero byte count. Only the
+    // non-empty side tables cost a block, which for these bodies is the code
+    // and the source map. Guards against a change that makes every site
+    // allocate for real.
+    try testing.expect(counting.allocations <= 3 * result.chunk_count);
+}
+
+test "reverse-ordered attrs and pattern binds survive a cache roundtrip" {
+    const allocator = testing.allocator;
+    // Names declared in descending order drive the sorted-invariant fixups on
+    // load: the attrset ops fall back from their `_srt` form, and the pattern
+    // bind pairs are re-sorted in place. Both run in the same walk as the id
+    // remap, so a fusion mistake shows up here.
+    const source =
+        \\let
+        \\  attrs = { zeta = 1; mid = 2; alpha = 3; };
+        \\  pat = { zulu, yankee ? 4, alfa }: zulu + yankee + alfa;
+        \\  nested = { q = { zz = 1; aa = 2; }; b = 3; };
+        \\in [ attrs.alpha attrs.zeta (pat { zulu = 5; alfa = 6; }) nested.q.aa ]
+    ;
+
+    var ev1 = try Engine.init(allocator, .{ .worker_count = 0 });
+    defer ev1.deinit();
+    const top1 = try ev1.compileSource(source, "sorted-roundtrip.nix");
+    var ids = try collectUnit(allocator, &ev1, top1);
+    defer ids.deinit(allocator);
+
+    const bytes = try serialize(allocator, ev1.chunkRegistry(), &ev1.intern, &ev1.heap, &ev1.compilation.deferred_table, .{
+        .source_path = "sorted-roundtrip.nix",
+        .chunk_ids = ids.items,
+        .deferred_ids = &.{},
+    });
+    defer allocator.free(bytes);
+
+    var ev2 = try Engine.init(allocator, .{ .worker_count = 0 });
+    defer ev2.deinit();
+    var ast_arena = ast.AstArena.init(allocator);
+    defer ast_arena.deinit();
+
+    const result = try load(bytes, .{
+        .allocator = ev2.allocator,
+        .registry = &ev2.registry,
+        .intern = &ev2.intern,
+        .heap = &ev2.heap,
+        .deferred = &ev2.compilation.deferred_table,
+        .ast_arena = &ast_arena,
+        .source = source,
+        .base_path = null,
+        .source_path = "sorted-roundtrip.nix",
+        .policy = .{},
+    });
+    try testing.expectEqual(@as(u32, @intCast(ids.items.len)), result.chunk_count);
+
+    var d1 = try disasmChunk(allocator, &ev1, top1);
+    defer d1.deinit(allocator);
+    var d2 = try disasmChunk(allocator, &ev2, result.top);
+    defer d2.deinit(allocator);
+
+    try testing.expectEqual(d1.lines.len, d2.lines.len);
+    for (d1.lines, d2.lines) |a, b| try testing.expectEqualStrings(a.name, b.name);
+}

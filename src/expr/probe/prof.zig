@@ -1,6 +1,8 @@
-//! Lightweight rdtsc-based profiler for the main thread's hot
+//! Lightweight tick-counter profiler for the main thread's hot
 //! serial paths. Build-gated on `-Dprof-main`; off-build compiles
-//! to no-ops with zero runtime footprint.
+//! to no-ops with zero runtime footprint. `base.timebase` supplies the
+//! counter, so one tick is a TSC cycle on x86_64 and a generic-timer
+//! tick on aarch64.
 //!
 //! Helpers don't update counters (we only care about main's serial
 //! pathlength). Each evaluator fiber owns its nesting stack, so suspension
@@ -26,9 +28,9 @@
 const std = @import("std");
 const InternTable = @import("runtime").intern.InternTable;
 const ChunkRegistry = @import("../bytecode.zig").chunk.ChunkRegistry;
-const builtin = @import("builtin");
 const build_options = @import("build_options");
 const worker_id = @import("base").worker_id;
+const timebase = @import("base").timebase;
 const BuiltinId = @import("runtime").builtins.BuiltinId;
 const prof_path_mod = @import("prof_path.zig");
 const prof_age = @import("prof_age.zig");
@@ -37,8 +39,8 @@ const prof_fiber = @import("prof_fiber.zig");
 const prof_census = @import("prof_census.zig");
 
 /// Compile-time switch. False when `-Dprof-main` wasn't passed.
-/// `rdtsc` is x86_64-only, so we additionally gate on arch.
-pub const enabled: bool = build_options.prof_main and builtin.cpu.arch == .x86_64;
+/// The probe needs a tick counter, so it also gates on the architecture.
+pub const enabled: bool = build_options.prof_main and timebase.supported;
 
 /// Tag for every instrumented path. Keep names short — they appear
 /// in the stats line as-is.
@@ -90,6 +92,12 @@ pub const Path = enum {
     parse,
     /// `Compiler.compileAndFinish` — AST → bytecode for an imported file.
     compile,
+    /// `chunk_cache.load` — decode a cached unit and register its chunks,
+    /// which replaces `parse` + `compile` on a cache hit. Without this scope
+    /// the work has no bucket of its own, so it lands in the exclusive time of
+    /// whichever builtin drove the import and makes `import` look slow. The
+    /// file read is not included; it happens before this scope opens.
+    chunk_cache_load,
     /// `strictness.stampOnBuilder` — per-chunk strictness analysis (a
     /// second AST walk building NameSets). Sub-phase of `compile`; its
     /// exclusive cycles are carved out of the `compile` bucket.
@@ -258,20 +266,12 @@ inline fn token(stack: *const Stack, idx: usize) u64 {
     return (@as(u64, stack.generation) << 32) | @as(u64, @intCast(idx));
 }
 
-/// Read the TSC. `rdtsc` returns a 64-bit counter formed from
-/// edx:eax. We use it as a coarse time source — the TSC is
-/// invariant on modern x86_64 so it doesn't pause across power
-/// states; the ratio to wall time is constant within a run.
+/// Read the tick counter. The unit is one tick of `base.timebase`: a TSC
+/// cycle on x86_64, a generic-timer tick on aarch64. The name stays `rdtsc`
+/// because `prof_age.zig`, `prof_census.zig` and `vm/force.zig` call it.
 pub inline fn rdtsc() u64 {
     if (!enabled) return 0;
-    var low: u32 = undefined;
-    var high: u32 = undefined;
-    asm volatile ("rdtsc"
-        : [low] "={eax}" (low),
-          [high] "={edx}" (high),
-        :
-        : .{ .memory = true });
-    return (@as(u64, high) << 32) | @as(u64, low);
+    return timebase.read();
 }
 
 /// Start a measurement on the main thread. Returns a sentinel
@@ -352,21 +352,46 @@ pub inline fn end(comptime path: Path, t: u64) void {
     }
 }
 
+/// Print the mean exclusive ticks per call, then end the line.
+///
+/// The mean is fractional on purpose. Integer division discards everything
+/// below one tick, and one tick is 40 ns on a 25 MHz counter — more than a
+/// cheap scope such as `force_value` costs, which made its average read as
+/// zero. The mean itself keeps the resolution the counter appears to lack,
+/// because each measurement's error is its phase against the tick edge and
+/// those errors cancel over millions of calls.
+///
+/// `avg_ns` appears only when the counter states its rate. See
+/// `base.timebase.toNs`.
+fn printAvgExcl(cycles: u64, calls: u64) void {
+    if (calls == 0) {
+        std.debug.print("\n", .{});
+        return;
+    }
+    const avg = @as(f64, @floatFromInt(cycles)) / @as(f64, @floatFromInt(calls));
+    if (timebase.toNs(avg)) |ns| {
+        std.debug.print(" avg_excl={d:.3} avg_ns={d:.1}\n", .{ avg, ns });
+    } else {
+        std.debug.print(" avg_excl={d:.3}\n", .{avg});
+    }
+}
+
 /// Dump the main-thread path + per-builtin cycle samples
 /// (`--stats`). Lives beside the counters it reads.
 /// `registry`/`intern` resolve chunk keys to source locations for the
 /// age-at-force per-body breakdown (same shapes as `prof_path.report`).
 pub fn report(registry: *const ChunkRegistry, intern: *const InternTable) void {
+    timebase.reportLine("prof");
     inline for (@typeInfo(Path).@"enum".fields) |f| {
         const samp = samples[f.value];
         if (samp.calls != 0) {
-            std.debug.print("prof: {s}: excl_cy={d} incl_cy={d} calls={d} avg_excl={d}\n", .{
+            std.debug.print("prof: {s}: excl_cy={d} incl_cy={d} calls={d}", .{
                 f.name,
                 samp.cycles,
                 samp.cycles_inclusive,
                 samp.calls,
-                samp.cycles / samp.calls,
             });
+            printAvgExcl(samp.cycles, samp.calls);
         }
     }
     // String-machinery census.
@@ -394,7 +419,8 @@ pub fn report(registry: *const ChunkRegistry, intern: *const InternTable) void {
     for (top_b) |entry| {
         if (entry.cycles == 0) break;
         const name = @import("runtime").builtins.displayName(@enumFromInt(entry.id));
-        std.debug.print("  {s}: excl={d} incl={d} calls={d} avg_excl={d}\n", .{ name, entry.cycles, entry.incl, entry.calls, entry.cycles / entry.calls });
+        std.debug.print("  {s}: excl={d} incl={d} calls={d}", .{ name, entry.cycles, entry.incl, entry.calls });
+        printAvgExcl(entry.cycles, entry.calls);
     }
     // Attr inline-cache, thunk-memo, repeat-force, and attr-lookup size censuses.
     prof_census.reportCaches();
@@ -472,4 +498,11 @@ test "fiber profiler stacks remain isolated across suspension" {
     end(.force_value, outer);
     try std.testing.expectEqual(@as(usize, 0), suspended.len);
     leaveFiber();
+}
+
+test "the main probe follows the build flag on every supported arch" {
+    if (!build_options.prof_main) return error.SkipZigTest;
+    if (!timebase.supported) return error.SkipZigTest;
+    try std.testing.expect(enabled);
+    try std.testing.expect(rdtsc() != 0);
 }
