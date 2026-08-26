@@ -272,6 +272,9 @@ pub fn materialize(
     var checkout: c.git_checkout_options = undefined;
     try check(c.git_checkout_options_init(&checkout, c.GIT_CHECKOUT_OPTIONS_VERSION));
     checkout.checkout_strategy = c.GIT_CHECKOUT_FORCE | c.GIT_CHECKOUT_RECREATE_MISSING | c.GIT_CHECKOUT_REMOVE_UNTRACKED;
+    // Nix hashes the raw committed blobs, so gitattributes and autocrlf
+    // filters must not rewrite them on checkout.
+    checkout.disable_filters = 1;
     try check(c.git_checkout_tree(repo.?, peeled.?, &checkout));
     try check(c.git_repository_set_head_detached(repo.?, oid));
     if (submodules) try updateSubmodules(repo.?, &context);
@@ -484,6 +487,7 @@ fn updateSubmodules(repo: *c.git_repository, context: *CallbackContext) !void {
             if (c.git_submodule_update_options_init(&opts, c.GIT_SUBMODULE_UPDATE_OPTIONS_VERSION) < 0) return -1;
             configureFetch(&opts.fetch_opts, self.context) catch return -1;
             opts.checkout_opts.checkout_strategy = c.GIT_CHECKOUT_FORCE | c.GIT_CHECKOUT_RECREATE_MISSING | c.GIT_CHECKOUT_REMOVE_UNTRACKED;
+            opts.checkout_opts.disable_filters = 1;
             if (c.git_submodule_update(submodule.?, 1, &opts) < 0) {
                 self.failed = true;
                 return -1;
@@ -518,7 +522,7 @@ fn createTestCommit(allocator: std.mem.Allocator, repository_path: []const u8, m
     var index: ?*c.git_index = null;
     try check(c.git_repository_index(&index, repo.?));
     defer c.git_index_free(index);
-    try check(c.git_index_add_bypath(index.?, "file"));
+    try check(c.git_index_add_all(index.?, null, c.GIT_INDEX_ADD_DEFAULT, null, null));
     try check(c.git_index_write(index.?));
     var tree_oid: c.git_oid = undefined;
     try check(c.git_index_write_tree(&tree_oid, index.?));
@@ -580,4 +584,30 @@ test "libgit2 clone, refresh, checkout, and metadata" {
     const second = try materialize(testing.allocator, url, clone_path, null, null, false, true, .{});
     try testing.expect(!std.mem.eql(u8, &first.rev, &second.rev));
     try testing.expectEqual(@as(i64, 2), second.rev_count);
+}
+
+test "materialize keeps raw blob bytes under gitattributes filters" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(testing.io, "source", .default_dir);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "source/.gitattributes", .data = "file text eol=crlf\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "source/file", .data = "one\ntwo\n" });
+    const source = try tmp.dir.realPathFileAlloc(testing.io, "source", testing.allocator);
+    defer testing.allocator.free(source);
+    const clone = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(clone);
+    const clone_path = try std.fs.path.join(testing.allocator, &.{ clone, "clone" });
+    defer testing.allocator.free(clone_path);
+    const url = try std.fmt.allocPrint(testing.allocator, "file://{s}", .{source});
+    defer testing.allocator.free(url);
+
+    try createTestCommit(testing.allocator, source, "one");
+    _ = try materialize(testing.allocator, url, clone_path, null, null, false, true, .{});
+
+    var clone_dir = try std.Io.Dir.cwd().openDir(testing.io, clone_path, .{});
+    defer clone_dir.close(testing.io);
+    const contents = try clone_dir.readFileAlloc(testing.io, "file", testing.allocator, .limited(64));
+    defer testing.allocator.free(contents);
+    try testing.expectEqualStrings("one\ntwo\n", contents);
 }
