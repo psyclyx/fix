@@ -11,7 +11,6 @@ const UnitTest = struct {
     filters: []const []const u8 = &.{},
 };
 
-
 fn addUnitTest(b: *std.Build, options: UnitTest) *std.Build.Step.Run {
     const compile = b.addTest(.{
         .name = options.name,
