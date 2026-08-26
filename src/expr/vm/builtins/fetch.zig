@@ -319,6 +319,23 @@ pub fn pathTreeValue(self: *VM, path: []const u8, nar_hash: []const u8, last_mod
     return Value.attrs(try self.heap.addAttrs(&entries));
 }
 
+/// A locked git input whose tree is already valid in the store: the same
+/// attrs `gitResultValue` reports, taken from the lock pins instead of a
+/// fetch.
+pub fn gitTreeValue(self: *VM, path: []const u8, nar_hash: []const u8, rev: []const u8, rev_count: i64, last_modified: i64, submodules: bool) !Value {
+    const entries = [_]heap_mod.AttrEntry{
+        .{ .name = try self.intern.intern("lastModified"), .value = Value.int(last_modified) },
+        .{ .name = try self.intern.intern("lastModifiedDate"), .value = Value.string(try self.intern.intern(&clock.formatUtc(last_modified))) },
+        .{ .name = try self.intern.intern("narHash"), .value = try treeNarHashValue(self, path, nar_hash, ".git") },
+        .{ .name = try self.intern.intern("outPath"), .value = try fetchedPathValue(self, path) },
+        .{ .name = try self.intern.intern("rev"), .value = Value.string(try self.intern.intern(rev)) },
+        .{ .name = try self.intern.intern("revCount"), .value = Value.int(rev_count) },
+        .{ .name = try self.intern.intern("shortRev"), .value = Value.string(try self.intern.intern(rev[0..@min(rev.len, 7)])) },
+        .{ .name = try self.intern.intern("submodules"), .value = Value.boolVal(submodules) },
+    };
+    return Value.attrs(try self.heap.addAttrs(&entries));
+}
+
 /// A local source tree's `lastModified`: the root's mtime in whole seconds, as
 /// Nix's path fetcher reports it (0 when the stat fails).
 pub fn sourceLastModified(self: *VM, path: []const u8) i64 {

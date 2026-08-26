@@ -36,6 +36,7 @@ const fetchGitSpecFromAttrs = fetch.fetchGitSpecFromAttrs;
 const gitResultValue = fetch.gitResultValue;
 const forgeTreeSpec = fetch.forgeTreeSpec;
 const githubTreeValue = fetch.githubTreeValue;
+const gitTreeValue = fetch.gitTreeValue;
 const fetchMercurialSpecFromAttrs = fetch.fetchMercurialSpecFromAttrs;
 const mercurialResultValue = fetch.mercurialResultValue;
 pub const builtinParseFlakeRef = flake_ref.parse;
@@ -1120,12 +1121,16 @@ fn flakeInputFromStore(self: *VM, attrs: Value) !?Value {
     const ty = (try optionalStringAttr(self, id, "type")) orelse return null;
     defer self.allocator.free(ty);
 
-    // Recursive-NAR (sourcePath) inputs only: forges/tarball/path. git/mercurial
-    // ingest differently and are left to fetch; file is flat, not a tree.
+    // Recursive-NAR (sourcePath) inputs whose narHash is verified against the
+    // lock: forges/tarball/path/git all ingest the fetched tree as a NAR under
+    // `source:sha256:<narHash>` (the VCS metadata directory is dropped before
+    // hashing), so the locked narHash alone names the store path. Mercurial's
+    // narHash is unverified and `file` is flat, not a tree; both fetch.
     const is_forge = std.mem.eql(u8, ty, "github") or std.mem.eql(u8, ty, "gitlab") or std.mem.eql(u8, ty, "sourcehut");
     const is_tarball = std.mem.eql(u8, ty, "tarball");
     const is_path = std.mem.eql(u8, ty, "path");
-    if (!is_forge and !is_tarball and !is_path) return null;
+    const is_git = std.mem.eql(u8, ty, "git");
+    if (!is_forge and !is_tarball and !is_path and !is_git) return null;
 
     // The store-path name must match what the fetch would use (see builtinFetchTree).
     const path_attr = if (is_path) (try optionalStringAttr(self, id, "path")) else null;
@@ -1154,6 +1159,18 @@ fn flakeInputFromStore(self: *VM, attrs: Value) !?Value {
         const rev = try optionalStringAttr(self, id, "rev");
         defer if (rev) |r| self.allocator.free(r);
         return try githubTreeValue(self, store_path, nar_hash, rev, null, last_modified);
+    }
+    if (is_git) {
+        // A git tree also exposes rev-derived attrs, which package definitions
+        // read; the lock pins are exactly what the fetch would have reported.
+        // Anything missing (e.g. a shallow lock has no revCount) falls back to
+        // the fetch.
+        const rev = (try optionalStringAttr(self, id, "rev")) orelse return null;
+        defer self.allocator.free(rev);
+        const rev_count = (try optionalIntAttr(self, id, "revCount")) orelse return null;
+        const locked_modified = (try optionalIntAttr(self, id, "lastModified")) orelse return null;
+        const submodules = (try optionalBoolAttr(self, id, "submodules")) orelse false;
+        return try gitTreeValue(self, store_path, nar_hash, rev, rev_count, locked_modified, submodules);
     }
     return try pathTreeValue(self, store_path, nar_hash, last_modified);
 }
