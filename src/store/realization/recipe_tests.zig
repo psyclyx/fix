@@ -5,6 +5,7 @@ const RealizationStore = @import("../realization.zig").RealizationStore;
 const FileCache = @import("../file_cache.zig").FileCache;
 const DaemonRuntime = @import("../daemon/runtime.zig").DaemonRuntime;
 const FakeDaemon = @import("testing/fake_daemon.zig").FakeDaemon;
+const DummyStore = @import("../testing/dummy_store.zig").DummyStore;
 
 const root_path = "/nix/store/00000000000000000000000000000000-root.drv";
 const dep_text_path = "/nix/store/11111111111111111111111111111111-dep-text";
@@ -35,6 +36,12 @@ fn attachFake(store: *RealizationStore, fake: *FakeDaemon) void {
     rt.* = DaemonRuntime.init();
     rt.pool_workers = 2;
     store.testAccess().takeDaemonRuntime(rt);
+}
+
+/// Attach an in-process backend that deliberately executes directly. No store
+/// runtime, pool, IO handle, or worker-protocol socket is involved.
+fn attachDummy(store: *RealizationStore, dummy: *DummyStore) !void {
+    try store.setBackend(dummy.driver());
 }
 
 const ProgressRecorder = struct {
@@ -202,6 +209,68 @@ test "daemon worker spans bracket validity checks and store writes" {
         try std.testing.expectEqual(@as(usize, 2), progress.count("check"));
         try std.testing.expectEqual(@as(usize, 1), progress.count("store"));
         try std.testing.expectEqual(@as(usize, 3), progress.ended);
+    } else return error.MissingRecipeRealizationApi;
+}
+
+test "dummy backend realizes dependency closures through the store interface" {
+    if (comptime realizationApiAvailable()) {
+        var dummy = DummyStore.init(std.testing.allocator);
+        defer dummy.deinit();
+        var store = RealizationStore.init(std.testing.allocator);
+        defer store.deinit();
+        try attachDummy(&store, &dummy);
+        store.enableStoreWrites();
+
+        try store.recordOwnedTextRecipe(dep_text_path, try owned(std.testing.allocator, "dependency"), &.{});
+        try store.recordOwnedTextRecipe(root_path, try owned(std.testing.allocator, "root"), &.{dep_text_path});
+        try store.ensureClosure(root_path);
+
+        try std.testing.expect(dummy.contains(dep_text_path));
+        try std.testing.expect(dummy.contains(root_path));
+        try std.testing.expectEqual(@as(usize, 2), dummy.effectCount(.text));
+
+        var materialized: [2][]const u8 = undefined;
+        var count: usize = 0;
+        for (0..dummy.effectsLen()) |index| {
+            const effect = dummy.effectAt(index).?;
+            if (effect.kind != .text) continue;
+            materialized[count] = effect.subject;
+            count += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 2), count);
+        try std.testing.expectEqualStrings(dep_text_path, materialized[0]);
+        try std.testing.expectEqualStrings(root_path, materialized[1]);
+
+        const contents = try store.readFileViaStore(std.testing.allocator, root_path);
+        defer std.testing.allocator.free(contents);
+        try std.testing.expectEqualStrings("root", contents);
+
+        try store.buildPaths(&.{root_path ++ "!out"}, null, .normal);
+        var missing = try store.queryMissing(&.{root_path ++ "!out"});
+        defer missing.deinit();
+        try std.testing.expectEqual(@as(usize, 1), missing.will_build.len);
+        try store.addIndirectRoot("/tmp/dummy-result", root_path);
+        try std.testing.expectEqual(@as(usize, 1), dummy.effectCount(.read));
+        try std.testing.expectEqual(@as(usize, 1), dummy.effectCount(.build));
+        try std.testing.expectEqual(@as(usize, 1), dummy.effectCount(.query_missing));
+        try std.testing.expectEqual(@as(usize, 1), dummy.effectCount(.root));
+    } else return error.MissingRecipeRealizationApi;
+}
+
+test "realization rejects a backend-computed store path mismatch" {
+    if (comptime realizationApiAvailable()) {
+        var dummy = DummyStore.init(std.testing.allocator);
+        defer dummy.deinit();
+        try dummy.setReturnedPath(missing_path);
+        var store = RealizationStore.init(std.testing.allocator);
+        defer store.deinit();
+        try attachDummy(&store, &dummy);
+        store.enableStoreWrites();
+
+        try std.testing.expectError(
+            error.StorePathMismatch,
+            store.instantiateText(root_path, "mismatched", &.{}),
+        );
     } else return error.MissingRecipeRealizationApi;
 }
 

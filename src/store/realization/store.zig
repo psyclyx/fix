@@ -10,6 +10,7 @@ const sync = @import("base").sync;
 const observ = @import("base").observ;
 const runtime = @import("runtime");
 const rstore = @import("../daemon.zig");
+const backend = @import("../backend.zig");
 const FileCache = @import("../file_cache.zig").FileCache;
 const DaemonRuntime = @import("../daemon/runtime.zig").DaemonRuntime;
 const Waiter = runtime.future.Waiter;
@@ -263,11 +264,17 @@ pub const RealizationStore = struct {
         self.daemon.setIo(io);
     }
 
+    /// Select an alternate store backend before backend execution starts.
+    /// The realization graph and evaluator-facing API remain unchanged.
+    pub fn setBackend(self: *RealizationStore, driver: backend.Driver) !void {
+        return self.daemon.setBackend(driver);
+    }
+
     /// Enable writing forced derivations + their sources to the store
     /// (`fix instantiate`/`build`). Off by default so plain eval stays pure.
-    /// Eagerly starts the connection pool (io + socket + options are configured
-    /// by now) so its connections warm concurrently with eval instead of on a
-    /// compute fiber's critical path at the first store op.
+    /// Eagerly starts the selected backend after configuration. For the daemon
+    /// driver this warms its connections concurrently with evaluation instead
+    /// of on a compute fiber's critical path at the first store operation.
     pub fn enableStoreWrites(self: *RealizationStore) void {
         self.daemon.enableWrites();
     }
@@ -295,23 +302,23 @@ pub const RealizationStore = struct {
         self.daemon.clearExecution();
     }
 
-    /// Recover the concrete daemon connection handed to a pool callback. Keep
-    /// it explicit through the operation instead of installing ambient TLS.
-    fn daemonConn(raw: ?*anyopaque) !*rstore.DaemonStore {
-        return if (raw) |conn| @ptrCast(@alignCast(conn)) else error.StoreUnavailable;
+    /// Recover the selected backend connection handed to a driver callback.
+    /// Keep it explicit through the operation instead of installing ambient
+    /// thread-local state.
+    fn storeConn(self: *RealizationStore, raw: ?*anyopaque) !backend.Connection {
+        return self.daemon.connection(raw);
     }
 
-    /// Run one daemon op: submit it to the pool and park the caller (a compute
-    /// fiber yields; the main thread / tests block). The pool hands its worker's
-    /// connection directly to `work(conn)`.
-    fn runOnDaemon(self: *RealizationStore, work: *const fn (conn: ?*anyopaque, work_ctx: *anyopaque) void, work_ctx: *anyopaque) !void {
+    /// Run one store op using the selected driver's execution policy. The
+    /// daemon driver parks evaluator fibers around pool work; another driver
+    /// may execute directly or use its own scheduler.
+    fn runOnStore(self: *RealizationStore, work: *const fn (conn: ?*anyopaque, work_ctx: *anyopaque) void, work_ctx: *anyopaque) !void {
         return self.daemon.run(work, work_ctx);
     }
 
-    /// Copy a failing op's daemon message out of its (transient) pool connection
-    /// so `lastStoreError` can surface it after the connection is reused. First
-    /// writer wins.
-    fn captureDaemonError(self: *RealizationStore, conn: *rstore.DaemonStore) void {
+    /// Copy a failing op's backend message out of its transient connection so
+    /// `lastStoreError` can surface it after reuse. First writer wins.
+    fn captureStoreError(self: *RealizationStore, conn: backend.Connection) void {
         self.daemon.captureError(conn);
     }
 
@@ -332,7 +339,7 @@ pub const RealizationStore = struct {
     /// gated on `store_writes_enabled` (off during plain eval).
     pub fn instantiateText(self: *RealizationStore, store_path: []const u8, text: []const u8, references: []const []const u8) !void {
         if (!self.daemon.writes_enabled) return;
-        return self.runDaemonOp(.{ .text = .{ .store_path = store_path, .text = text, .references = references } }, true);
+        return self.runStoreOp(.{ .text = .{ .store_path = store_path, .text = text, .references = references } }, true);
     }
 
     /// Write a NAR-serialized source tree, gated on `store_writes_enabled`.
@@ -340,14 +347,14 @@ pub const RealizationStore = struct {
     /// references them — so `input_srcs` are valid in time.
     pub fn instantiatePath(self: *RealizationStore, store_path: []const u8, nar_bytes: []const u8) !void {
         if (!self.daemon.writes_enabled) return;
-        return self.runDaemonOp(.{ .path = .{ .store_path = store_path, .nar_bytes = nar_bytes } }, true);
+        return self.runStoreOp(.{ .path = .{ .store_path = store_path, .nar_bytes = nar_bytes } }, true);
     }
 
     /// Add a flat file's raw bytes to the store (fetchurl), gated on
     /// `store_writes_enabled`.
     pub fn instantiateFlat(self: *RealizationStore, store_path: []const u8, bytes: []const u8) !void {
         if (!self.daemon.writes_enabled) return;
-        return self.runDaemonOp(.{ .flat = .{ .store_path = store_path, .bytes = bytes } }, true);
+        return self.runStoreOp(.{ .flat = .{ .store_path = store_path, .bytes = bytes } }, true);
     }
 
     /// Is `store_path` already valid in the store? Used to skip fetching an
@@ -361,11 +368,11 @@ pub const RealizationStore = struct {
     }
 
     fn queryPathValid(self: *RealizationStore, store_path: []const u8) !bool {
-        // Caller-side cache hit: skip the pool round-trip entirely (the closure
+        // Caller-side cache hit: skip the backend round-trip entirely (the closure
         // walk hits this for every already-present path).
         if (self.cacheContains(store_path)) return true;
         var cell: QueryCell = .{ .store = self, .store_path = store_path };
-        try self.runOnDaemon(QueryCell.run, &cell);
+        try self.runOnStore(QueryCell.run, &cell);
         if (cell.err) |e| return e;
         return cell.valid;
     }
@@ -378,28 +385,34 @@ pub const RealizationStore = struct {
 
         fn run(conn: ?*anyopaque, p: *anyopaque) void {
             const c: *QueryCell = @ptrCast(@alignCast(p));
-            const daemon = daemonConn(conn) catch |e| {
+            const store_conn = c.store.storeConn(conn) catch |e| {
                 c.err = e;
                 return;
             };
-            c.valid = c.store.applyIsValid(daemon, c.store_path) catch |e| {
+            c.valid = c.store.applyIsValid(store_conn, c.store_path) catch |e| {
                 c.err = e;
                 return;
             };
         }
     };
 
-    /// Read a store path's file contents via the daemon (`NarFromPath`), for a
-    /// remote store where the path isn't on local disk. Single-regular-file only.
-    pub fn readFileViaDaemon(self: *RealizationStore, allocator: std.mem.Allocator, store_path: []const u8) ![]u8 {
+    /// Read a regular-file store object's contents through the selected backend.
+    pub fn readFileViaStore(self: *RealizationStore, allocator: std.mem.Allocator, store_path: []const u8) ![]u8 {
         if (!self.daemon.writes_enabled) return error.StoreUnavailable;
-        var cell: NarCell = .{ .allocator = allocator, .store_path = store_path };
-        try self.runOnDaemon(NarCell.run, &cell);
+        var cell: NarCell = .{ .store = self, .allocator = allocator, .store_path = store_path };
+        try self.runOnStore(NarCell.run, &cell);
         if (cell.err) |e| return e;
         return cell.data orelse error.StoreUnavailable;
     }
 
+    /// Compatibility spelling for callers that still assume the default Nix
+    /// worker-protocol backend.
+    pub fn readFileViaDaemon(self: *RealizationStore, allocator: std.mem.Allocator, store_path: []const u8) ![]u8 {
+        return self.readFileViaStore(allocator, store_path);
+    }
+
     const NarCell = struct {
+        store: *RealizationStore,
         allocator: std.mem.Allocator,
         store_path: []const u8,
         data: ?[]u8 = null,
@@ -407,11 +420,12 @@ pub const RealizationStore = struct {
 
         fn run(conn: ?*anyopaque, p: *anyopaque) void {
             const c: *NarCell = @ptrCast(@alignCast(p));
-            const daemon = daemonConn(conn) catch |e| {
+            const store_conn = c.store.storeConn(conn) catch |e| {
                 c.err = e;
                 return;
             };
-            c.data = daemon.narFromPath(c.allocator, c.store_path) catch |e| {
+            c.data = store_conn.readFile(c.allocator, c.store_path) catch |e| {
+                c.store.captureStoreError(store_conn);
                 c.err = e;
                 return;
             };
@@ -422,11 +436,14 @@ pub const RealizationStore = struct {
     /// populating the `instantiated` cache. The daemon round-trip runs without
     /// `daemon_mu` held (it guards only the brief cache touches), so concurrent
     /// pool workers don't serialize on it.
-    fn applyIsValid(self: *RealizationStore, conn: *rstore.DaemonStore, store_path: []const u8) !bool {
+    fn applyIsValid(self: *RealizationStore, conn: backend.Connection, store_path: []const u8) !bool {
         if (self.cacheContains(store_path)) return true;
         var span = self.observer.beginOn(&check_observation, .{ .subject = .{ .path = store_path } }, .daemon);
         defer span.cancel();
-        const valid = try conn.isValidPath(store_path);
+        const valid = conn.isValidPath(store_path) catch |err| {
+            self.captureStoreError(conn);
+            return err;
+        };
         // A path valid now stays valid for the eval (same assumption the cache
         // already makes for writes), so a later demand skips the round-trip.
         if (valid) self.cacheMark(store_path);
@@ -443,13 +460,13 @@ pub const RealizationStore = struct {
     /// build runs on a warm worker connection, not a compute worker.
     pub fn buildPaths(self: *RealizationStore, derived_paths: []const []const u8, sink: ?rstore.BuildSink, mode: rstore.BuildMode) !void {
         var cell: BuildCell = .{ .store = self, .paths = derived_paths, .sink = sink, .mode = mode };
-        try self.runOnDaemon(BuildCell.run, &cell);
+        try self.runOnStore(BuildCell.run, &cell);
         return cell.err;
     }
 
     pub fn queryMissing(self: *RealizationStore, derived_paths: []const []const u8) !rstore.MissingPlan {
         var cell: MissingCell = .{ .store = self, .paths = derived_paths };
-        try self.runOnDaemon(MissingCell.run, &cell);
+        try self.runOnStore(MissingCell.run, &cell);
         return cell.result;
     }
 
@@ -460,7 +477,7 @@ pub const RealizationStore = struct {
 
         fn run(conn: ?*anyopaque, raw: *anyopaque) void {
             const self: *MissingCell = @ptrCast(@alignCast(raw));
-            const daemon = daemonConn(conn) catch |err| {
+            const store_conn = self.store.storeConn(conn) catch |err| {
                 self.result = err;
                 return;
             };
@@ -468,8 +485,8 @@ pub const RealizationStore = struct {
             const label = pathsLabel(&label_buffer, self.paths);
             var span = self.store.observer.beginOn(&query_observation, .{ .subject = .{ .text = label } }, .daemon);
             defer span.cancel();
-            const result = daemon.queryMissing(self.store.allocator, self.paths) catch |err| {
-                self.store.captureDaemonError(daemon);
+            const result = store_conn.queryMissing(self.store.allocator, self.paths) catch |err| {
+                self.store.captureStoreError(store_conn);
                 self.result = err;
                 return;
             };
@@ -479,14 +496,14 @@ pub const RealizationStore = struct {
     };
 
     /// Caller-owned asynchronous build request. Its path slices and sink must
-    /// remain valid through `wait`; the daemon pool signals `done` after the
-    /// connection is released back to the pool.
+    /// remain valid through `wait`; the selected driver may finish inline or
+    /// signal `done` after asynchronous execution.
     pub const AsyncBuildRequest = struct {
         store: ?*RealizationStore = null,
         paths: []const []const u8 = &.{},
         sink: ?rstore.BuildSink = null,
         mode: rstore.BuildMode = .normal,
-        job: rstore.DaemonPool.Job = undefined,
+        job: backend.Job = undefined,
         done: sync.Semaphore = sync.Semaphore.init(0),
         result: anyerror!void = {},
 
@@ -507,19 +524,19 @@ pub const RealizationStore = struct {
         fn run(conn: ?*anyopaque, raw: *anyopaque) void {
             const self: *AsyncBuildRequest = @ptrCast(@alignCast(raw));
             const store = self.store.?;
-            const daemon = daemonConn(conn) catch |err| {
+            const store_conn = store.storeConn(conn) catch |err| {
                 self.result = err;
                 self.done.release();
                 return;
             };
-            self.result = store.buildOnConn(daemon, self.paths, self.sink, self.mode);
+            self.result = store.buildOnConn(store_conn, self.paths, self.sink, self.mode);
             self.done.release();
         }
     };
 
-    /// Hand a build to the daemon pool and return immediately. Pool startup
-    /// failures complete the request with that error, keeping the wait path
-    /// uniform for callers.
+    /// Hand a build to the selected driver. It may complete inline; startup or
+    /// submission failures complete the request with that error, keeping the
+    /// wait path uniform for callers.
     pub fn submitBuild(self: *RealizationStore, request: *AsyncBuildRequest) void {
         request.store = self;
         request.job = .{ .run = AsyncBuildRequest.run, .ctx = request };
@@ -533,7 +550,7 @@ pub const RealizationStore = struct {
     }
 
     /// Build against the connection supplied by the pool worker.
-    fn buildOnConn(self: *RealizationStore, conn: *rstore.DaemonStore, derived_paths: []const []const u8, sink: ?rstore.BuildSink, mode: rstore.BuildMode) !void {
+    fn buildOnConn(self: *RealizationStore, conn: backend.Connection, derived_paths: []const []const u8, sink: ?rstore.BuildSink, mode: rstore.BuildMode) !void {
         var label_buffer: [128]u8 = undefined;
         const label = pathsLabel(&label_buffer, derived_paths);
         // A typed activity sink reports the actual builds/substitutions inside
@@ -545,7 +562,7 @@ pub const RealizationStore = struct {
             observ.Span{};
         defer span.cancel();
         conn.buildPaths(derived_paths, sink, mode) catch |err| {
-            self.captureDaemonError(conn);
+            self.captureStoreError(conn);
             return err;
         };
         span.finish(.{});
@@ -560,11 +577,11 @@ pub const RealizationStore = struct {
 
         fn run(conn: ?*anyopaque, p: *anyopaque) void {
             const self: *BuildCell = @ptrCast(@alignCast(p));
-            const daemon = daemonConn(conn) catch |e| {
+            const store_conn = self.store.storeConn(conn) catch |e| {
                 self.err = e;
                 return;
             };
-            self.err = self.store.buildOnConn(daemon, self.paths, self.sink, self.mode);
+            self.err = self.store.buildOnConn(store_conn, self.paths, self.sink, self.mode);
         }
     };
 
@@ -572,7 +589,7 @@ pub const RealizationStore = struct {
     /// indirect GC root via the daemon.
     pub fn addIndirectRoot(self: *RealizationStore, link_path: []const u8, target: []const u8) !void {
         var cell: RootCell = .{ .store = self, .link_path = link_path, .target = target };
-        try self.runOnDaemon(RootCell.run, &cell);
+        try self.runOnStore(RootCell.run, &cell);
         return cell.err;
     }
 
@@ -585,7 +602,7 @@ pub const RealizationStore = struct {
         fn run(conn: ?*anyopaque, p: *anyopaque) void {
             const self: *RootCell = @ptrCast(@alignCast(p));
             self.err = blk: {
-                const c = daemonConn(conn) catch |e| break :blk e;
+                const c = self.store.storeConn(conn) catch |e| break :blk e;
                 var span = self.store.observer.beginOn(
                     &register_observation,
                     .{
@@ -595,14 +612,17 @@ pub const RealizationStore = struct {
                     .daemon,
                 );
                 defer span.cancel();
-                c.addIndirectRoot(self.link_path) catch |err| break :blk err;
+                c.addIndirectRoot(self.link_path, self.target) catch |err| {
+                    self.store.captureStoreError(c);
+                    break :blk err;
+                };
                 span.finish(.{});
                 break :blk {};
             };
         }
     };
 
-    const DaemonOp = union(enum) {
+    const StoreOp = union(enum) {
         text: struct { store_path: []const u8, text: []const u8, references: []const []const u8 },
         path: struct { store_path: []const u8, nar_bytes: []const u8 },
         flat: struct { store_path: []const u8, bytes: []const u8 },
@@ -611,37 +631,37 @@ pub const RealizationStore = struct {
     /// Dispatch a store write to the pool (parking the caller) or inline. The op's
     /// args are borrowed and stay valid across the transfer because the calling
     /// fiber parks (its stack — holding the NAR/text buffers — is preserved).
-    fn runDaemonOp(self: *RealizationStore, op: DaemonOp, report_progress: bool) !void {
+    fn runStoreOp(self: *RealizationStore, op: StoreOp, report_progress: bool) !void {
         var cell: OpCell = .{ .store = self, .op = op, .report_progress = report_progress };
-        try self.runOnDaemon(OpCell.run, &cell);
+        try self.runOnStore(OpCell.run, &cell);
         return cell.err;
     }
 
     const OpCell = struct {
         store: *RealizationStore,
-        op: DaemonOp,
+        op: StoreOp,
         report_progress: bool = false,
         err: anyerror!void = {},
 
         fn run(conn: ?*anyopaque, p: *anyopaque) void {
             const self: *OpCell = @ptrCast(@alignCast(p));
-            const daemon = daemonConn(conn) catch |e| {
+            const store_conn = self.store.storeConn(conn) catch |e| {
                 self.err = e;
                 return;
             };
-            self.err = self.store.applyDaemonOp(daemon, self.op, self.report_progress);
+            self.err = self.store.applyStoreOp(store_conn, self.op, self.report_progress);
         }
     };
 
     /// Perform a store write against the supplied connection. Skips the transfer
     /// when the path is already valid (cache or a daemon check). Cache touches are
     /// briefly guarded; the daemon round-trips run without `daemon_mu`.
-    fn applyDaemonOp(self: *RealizationStore, daemon: *rstore.DaemonStore, op: DaemonOp, report_progress: bool) !void {
+    fn applyStoreOp(self: *RealizationStore, store_conn: backend.Connection, op: StoreOp, report_progress: bool) !void {
         const store_path = switch (op) {
             inline else => |o| o.store_path,
         };
         if (self.cacheContains(store_path)) return;
-        if (try self.applyIsValid(daemon, store_path)) return;
+        if (try self.applyIsValid(store_conn, store_path)) return;
         // The fetch that produced this content and its store write are distinct
         // operations, so both get spans. Open this only after the validity
         // check confirms that a transfer will actually happen.
@@ -650,15 +670,30 @@ pub const RealizationStore = struct {
         else
             observ.Span{};
         defer span.cancel();
-        const written = switch (op) {
-            .text => |o| daemon.addTextToStore(self.allocator, daemonStoreName(store_path), o.text, o.references),
-            .path => |o| daemon.addPath(self.allocator, daemonStoreName(store_path), o.nar_bytes, &.{}),
-            .flat => |o| daemon.addFlatFile(self.allocator, daemonStoreName(store_path), o.bytes, &.{}),
-        } catch |err| {
-            self.captureDaemonError(daemon);
+        const object: backend.AddObject = switch (op) {
+            .text => |o| .{ .text = .{
+                .expected_path = store_path,
+                .name = daemonStoreName(store_path),
+                .bytes = o.text,
+                .references = o.references,
+            } },
+            .path => |o| .{ .nar = .{
+                .expected_path = store_path,
+                .name = daemonStoreName(store_path),
+                .bytes = o.nar_bytes,
+            } },
+            .flat => |o| .{ .flat = .{
+                .expected_path = store_path,
+                .name = daemonStoreName(store_path),
+                .bytes = o.bytes,
+            } },
+        };
+        const written = store_conn.addObject(self.allocator, object) catch |err| {
+            self.captureStoreError(store_conn);
             return err;
         };
-        self.allocator.free(written);
+        defer self.allocator.free(written);
+        if (!std.mem.eql(u8, written, store_path)) return error.StorePathMismatch;
         self.cacheMark(store_path);
         span.finish(.{});
     }
@@ -875,9 +910,9 @@ pub const RealizationStore = struct {
         // References are on disk now; write this path (offloaded to the pool). The
         const report_progress = recipe.report_progress;
         switch (recipe.payload) {
-            .text => |text| try self.runDaemonOp(.{ .text = .{ .store_path = store_path, .text = text.bytes, .references = text.references } }, report_progress),
-            .nar => |nar_bytes| try self.runDaemonOp(.{ .path = .{ .store_path = store_path, .nar_bytes = nar_bytes } }, report_progress),
-            .flat => |bytes| try self.runDaemonOp(.{ .flat = .{ .store_path = store_path, .bytes = bytes.bytes() } }, report_progress),
+            .text => |text| try self.runStoreOp(.{ .text = .{ .store_path = store_path, .text = text.bytes, .references = text.references } }, report_progress),
+            .nar => |nar_bytes| try self.runStoreOp(.{ .path = .{ .store_path = store_path, .nar_bytes = nar_bytes } }, report_progress),
+            .flat => |bytes| try self.runStoreOp(.{ .flat = .{ .store_path = store_path, .bytes = bytes.bytes() } }, report_progress),
         }
         self.releaseRecipeForPath(store_path);
     }

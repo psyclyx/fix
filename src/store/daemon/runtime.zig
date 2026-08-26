@@ -1,46 +1,35 @@
-//! DaemonRuntime: owns the background daemon-facing infrastructure `fix` uses to
-//! keep blocking nix-daemon store ops off the compute-fiber workers.
+//! DaemonRuntime owns the background infrastructure used by the built-in Nix
+//! worker-protocol backend.
 //!
-//! The **pool** (`store/daemon/pool.zig`) is a set of hot daemon connections, each on
-//! its own background IO thread, draining a shared job queue. Every store op —
-//! `.drv`/source writes, `isValidPath` queries, builds, GC roots — is submitted
-//! to the pool while the calling fiber parks; a daemon worker runs it
-//! on a warm connection and wakes the fiber. Connections stay hot and reused
-//! across the whole run (eval, on-demand closure writes, the terminal build).
-//! These threads are IO-bound (parked on the socket), separate from and not
-//! counted against the `--workers` compute pool.
-//!
-//! Store-writing commands start the pool eagerly after configuration so the
-//! daemon handshake overlaps evaluation. Plain evaluation starts it on first
-//! store demand. Ordering belongs to the realization layer's closure walk.
+//! The backend-neutral Driver interface does not require a pool. This runtime
+//! is the daemon driver's chosen execution policy: a set of hot connections on
+//! background threads, with evaluator fibers parked while a worker runs.
 
 const std = @import("std");
 const rstore = @import("../daemon.zig");
+const backend = @import("../backend.zig");
+const daemon_backend = @import("backend.zig");
+const daemon_execution = @import("../realization/daemon_execution.zig");
 const sync = @import("base").sync;
 
 const DaemonPool = rstore.DaemonPool;
 
-/// Hot-connection count. Its own knob: these are IO-bound threads parked on the
-/// daemon socket, so this is not tied to `--workers`. Bounds concurrent client-
-/// driven builds (each build holds its connection for the whole build); writes
-/// and queries are short and interleave freely.
+/// Hot-connection count. These threads are IO-bound and independent of the
+/// evaluator's compute workers. Bounds concurrent client-driven builds.
 const default_pool_workers: usize = 8;
 
 pub const DaemonRuntime = struct {
     pool: DaemonPool = undefined,
     pool_started: bool = false,
     pool_mu: sync.BlockingMutex = .{},
-    cfg: ConnConfig = .{},
-    /// Hot-connection count (see `default_pool_workers`). Overridable — tests set
-    /// a small value against the fake daemon.
+    daemon_config: DaemonConfig = .{},
+    executor: ?daemon_execution.Executor = null,
+    /// Hot-connection count. Tests override this with a small value.
     pool_workers: usize = default_pool_workers,
 
-    /// How the pool opens a connection. `apply_options` is on only for store-
-    /// writing commands (build/instantiate/run/shell): plain `eval` that realizes
-    /// on demand (IFD) must NOT push fix's resolved settings, which would replace
-    /// the daemon's richer defaults (e.g. strip `/bin/sh` from the build sandbox);
-    /// the daemon reads the same nix.conf, so its own config is authoritative.
-    const ConnConfig = struct {
+    /// Pool workers retain this runtime-owned configuration rather than a
+    /// pointer to the movable realization client that selected it.
+    const DaemonConfig = struct {
         allocator: std.mem.Allocator = undefined,
         io: std.Io = undefined,
         socket: []const u8 = "",
@@ -52,44 +41,130 @@ pub const DaemonRuntime = struct {
         return .{};
     }
 
-    /// Lazily create + start the connection pool with the given connection config.
-    /// Idempotent: the first caller sets the config and spawns the warm workers;
-    /// later callers get the running pool. Config is fixed per run (socket +
-    /// options + write-mode don't change once a command is under way).
-    pub fn ensurePool(
+    /// Configure and return the built-in daemon driver. Configuration is fixed
+    /// once the driver starts, just like selecting any alternate backend.
+    pub fn configureDaemon(
         self: *DaemonRuntime,
         allocator: std.mem.Allocator,
         io: std.Io,
         socket: []const u8,
         options: ?rstore.BuildSettings,
         apply_options: bool,
-    ) !*DaemonPool {
+    ) !backend.Driver {
+        self.pool_mu.lock();
+        defer self.pool_mu.unlock();
+        if (self.pool_started) return error.BackendAlreadyStarted;
+        self.daemon_config = .{
+            .allocator = allocator,
+            .io = io,
+            .socket = socket,
+            .options = options,
+            .apply_options = apply_options,
+        };
+        return self.driver();
+    }
+
+    /// Install the evaluator capability that parks fibers around daemon-pool
+    /// work. Tests and non-evaluator callers leave this null and block instead.
+    pub fn setExecutor(self: *DaemonRuntime, executor: ?daemon_execution.Executor) void {
+        self.executor = executor;
+    }
+
+    fn driver(self: *DaemonRuntime) backend.Driver {
+        return .{ .ptr = self, .vtable = &driver_vtable };
+    }
+
+    fn ensurePool(self: *DaemonRuntime) !*DaemonPool {
         self.pool_mu.lock();
         defer self.pool_mu.unlock();
         if (self.pool_started) return &self.pool;
-        self.cfg = .{ .allocator = allocator, .io = io, .socket = socket, .options = options, .apply_options = apply_options };
-        self.pool = DaemonPool.init(allocator, .{ .ctx = self, .open = openConn, .close = closeConn }, self.pool_workers);
-        try self.pool.start();
+
+        self.pool = DaemonPool.init(self.daemon_config.allocator, .{
+            .ctx = &self.daemon_config,
+            .open = openDaemon,
+            .close = closeDaemon,
+        }, self.pool_workers);
+        self.pool.start() catch |err| {
+            self.pool.deinit();
+            return err;
+        };
         self.pool_started = true;
         return &self.pool;
     }
 
-    fn openConn(ctx: *anyopaque) anyerror!*anyopaque {
-        const self: *DaemonRuntime = @ptrCast(@alignCast(ctx));
-        const d = try rstore.DaemonStore.connect(self.cfg.allocator, self.cfg.io, self.cfg.socket);
-        errdefer d.deinit();
-        if (self.cfg.apply_options) {
-            if (self.cfg.options) |opts| try d.setOptions(opts);
+    fn openDaemon(raw: *anyopaque) !*anyopaque {
+        const config: *DaemonConfig = @ptrCast(@alignCast(raw));
+        const daemon = try rstore.DaemonStore.connect(config.allocator, config.io, config.socket);
+        errdefer daemon.deinit();
+        // Explicit store-writing commands apply their resolved client options.
+        // Plain evaluation may perform IFD but leaves system config authoritative.
+        if (config.apply_options) {
+            if (config.options) |options| try daemon.setOptions(options);
         }
-        return d;
+        return daemon;
     }
 
-    fn closeConn(_: *anyopaque, conn: *anyopaque) void {
-        const d: *rstore.DaemonStore = @ptrCast(@alignCast(conn));
-        d.deinit();
+    fn closeDaemon(_: *anyopaque, raw: *anyopaque) void {
+        const daemon: *rstore.DaemonStore = @ptrCast(@alignCast(raw));
+        daemon.deinit();
     }
 
     pub fn deinit(self: *DaemonRuntime) void {
         if (self.pool_started) self.pool.deinit();
     }
+
+    const driver_vtable: backend.Driver.VTable = .{
+        .start = startDriver,
+        .run = runDriver,
+        .submit = submitDriver,
+        .connection = driverConnection,
+    };
+
+    fn fromDriver(raw: *anyopaque) *DaemonRuntime {
+        return @ptrCast(@alignCast(raw));
+    }
+
+    fn startDriver(raw: *anyopaque) !void {
+        _ = try fromDriver(raw).ensurePool();
+    }
+
+    fn runDriver(raw: *anyopaque, work: backend.WorkFn, context: *anyopaque) !void {
+        const self = fromDriver(raw);
+        const pool = try self.ensurePool();
+        if (self.executor) |executor| {
+            executor.runPool(pool, work, context);
+        } else {
+            pool.submitBlocking(work, context);
+        }
+    }
+
+    fn submitDriver(raw: *anyopaque, job: *backend.Job) !void {
+        const pool = try fromDriver(raw).ensurePool();
+        pool.submit(job);
+    }
+
+    fn driverConnection(_: *anyopaque, raw_connection: *anyopaque) backend.Connection {
+        return .{ .context = raw_connection, .vtable = &daemon_backend.vtable };
+    }
 };
+
+test "daemon driver retains runtime-owned configuration" {
+    var runtime = DaemonRuntime.init();
+    runtime.pool_workers = 1;
+    defer runtime.deinit();
+
+    const driver = try runtime.configureDaemon(
+        std.testing.allocator,
+        std.testing.io,
+        "/definitely/missing/fix-test-daemon.sock",
+        null,
+        false,
+    );
+    try std.testing.expect(driver.ptr == @as(*anyopaque, @ptrCast(&runtime)));
+    try driver.start();
+    try std.testing.expect(runtime.pool.backend.ctx == @as(*anyopaque, @ptrCast(&runtime.daemon_config)));
+
+    var raw_connection: u8 = 0;
+    const connection = driver.connection(&raw_connection);
+    try std.testing.expect(connection.vtable == &daemon_backend.vtable);
+}

@@ -7,10 +7,12 @@ pub const file_cache = @import("file_cache.zig");
 pub const nar = @import("nar.zig");
 pub const daemon = @import("daemon.zig");
 pub const daemon_runtime = @import("daemon/runtime.zig");
+pub const backend = @import("backend.zig");
 
 pub const FileCache = file_cache.FileCache;
 pub const RealizationStore = realization.RealizationStore;
 pub const DaemonRuntime = daemon_runtime.DaemonRuntime;
+pub const BackendDriver = backend.Driver;
 
 test {
     _ = derivation;
@@ -18,5 +20,6 @@ test {
     _ = FileCache;
     _ = nar;
     _ = daemon;
+    _ = backend;
     _ = DaemonRuntime;
 }

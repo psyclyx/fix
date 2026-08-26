@@ -11,6 +11,7 @@ pub const daemon_execution = @import("realization/daemon_execution.zig");
 pub const RealizationStore = store.RealizationStore;
 pub const testing = struct {
     pub const FakeDaemon = @import("realization/testing/fake_daemon.zig").FakeDaemon;
+    pub const DummyStore = @import("testing/dummy_store.zig").DummyStore;
 };
 
 test {
@@ -20,4 +21,5 @@ test {
     _ = @import("realization/tests.zig");
     _ = @import("realization/recipe_tests.zig");
     _ = @import("realization/testing/fake_daemon.zig");
+    _ = @import("testing/dummy_store.zig");
 }

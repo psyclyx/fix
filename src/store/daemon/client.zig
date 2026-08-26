@@ -12,9 +12,9 @@ const std = @import("std");
 const terminal_text = @import("base").terminal_text;
 const wire = @import("wire.zig");
 const build_events = @import("build_events.zig");
-const settings = @import("settings.zig");
 const endpoint = @import("endpoint.zig");
 const nar_reader = @import("nar_reader.zig");
+const backend = @import("../backend.zig");
 
 const ActivityType = enum(u64) {
     build = 105,
@@ -32,42 +32,22 @@ const ResultType = enum(u64) {
 
 /// A consumer of the daemon's build activity/log stream (see `buildPaths`).
 /// Callbacks run on the calling thread while the build is in progress.
-pub const BuildSink = build_events.Sink;
+pub const BuildSink = backend.BuildSink;
 
 /// Build realization mode sent with `build_paths` (Nix's `BuildMode`): the
 /// default build, `--repair` (rebuild and fix corrupted paths), or `--check`
 /// (rebuild and verify outputs are unchanged).
-pub const BuildMode = settings.Mode;
+pub const BuildMode = backend.BuildMode;
 
 /// A `name = value` daemon setting carried in the `set_options` overrides map.
-pub const Setting = settings.Setting;
+pub const Setting = backend.Setting;
 
 /// Per-connection daemon settings applied via `set_options` (op 19). Mirrors
 /// the client settings Nix sends after the handshake: the fixed fields plus a
 /// trailing overrides map for any other `nix.conf` key (e.g. `timeout`). The
 /// daemon applies the map after the fixed fields, so an override wins.
-pub const BuildSettings = settings.Settings;
-
-pub const MissingPlan = struct {
-    allocator: std.mem.Allocator,
-    will_build: [][]u8,
-    will_substitute: [][]u8,
-    unknown: [][]u8,
-    download_size: u64,
-    nar_size: u64,
-
-    pub fn deinit(self: *MissingPlan) void {
-        freeStrings(self.allocator, self.will_build);
-        freeStrings(self.allocator, self.will_substitute);
-        freeStrings(self.allocator, self.unknown);
-        self.* = undefined;
-    }
-
-    fn freeStrings(allocator: std.mem.Allocator, strings: [][]u8) void {
-        for (strings) |item| allocator.free(item);
-        allocator.free(strings);
-    }
-};
+pub const BuildSettings = backend.BuildSettings;
+pub const MissingPlan = backend.MissingPlan;
 
 /// A daemon connection over a direct socket or an explicit SSH remote. Store
 /// selection never falls back to a locally installed Nix/Lix implementation.

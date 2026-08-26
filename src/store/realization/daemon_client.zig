@@ -1,9 +1,10 @@
-//! Nix-daemon configuration, connection-pool access, and presence cache.
+//! Store-backend selection, execution dispatch, and presence cache.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const sync = @import("base").sync;
 const rstore = @import("../daemon.zig");
+const backend = @import("../backend.zig");
 const DaemonRuntime = @import("../daemon/runtime.zig").DaemonRuntime;
 const Future = @import("runtime").future.Future;
 const daemon_execution = @import("daemon_execution.zig");
@@ -21,8 +22,9 @@ pub const Client = struct {
     writes_enabled: bool = false,
     pool_executor: ?daemon_execution.Executor = null,
     runtime: ?*DaemonRuntime = null,
-    pool: ?*rstore.DaemonPool = null,
-    pool_mu: sync.BlockingMutex = .{},
+    active_driver: ?backend.Driver = null,
+    backend_mu: sync.BlockingMutex = .{},
+    backend_driver: ?backend.Driver = null,
     test_owned_runtime: if (builtin.is_test) ?*DaemonRuntime else void = if (builtin.is_test) null else {},
 
     pub fn init(allocator: std.mem.Allocator) Client {
@@ -43,6 +45,7 @@ pub const Client = struct {
         deinitOverrides(self.allocator, &self.overrides);
         if (self.socket_owned) |owned| self.allocator.free(owned);
         if (self.last_error_msg) |message| self.allocator.free(message);
+        if (self.backend_driver) |selected| selected.destroy();
     }
 
     pub fn setBuildSettings(self: *Client, settings: rstore.BuildSettings) !void {
@@ -94,20 +97,33 @@ pub const Client = struct {
         self.io = io;
     }
 
+    /// Replace the default worker-protocol backend. Selection is allowed only
+    /// before backend execution starts; the client owns `driver` through
+    /// `deinit` (a borrowed driver leaves its vtable's `destroy` null).
+    pub fn setBackend(self: *Client, selected: backend.Driver) !void {
+        self.backend_mu.lock();
+        defer self.backend_mu.unlock();
+        if (self.active_driver != null) return error.BackendAlreadyStarted;
+        if (self.backend_driver) |old| old.destroy();
+        self.backend_driver = selected;
+    }
+
     pub fn enableWrites(self: *Client) void {
         self.writes_enabled = true;
-        _ = self.ensurePool() catch {};
+        _ = self.ensureBackend() catch {};
     }
 
     pub fn setExecution(self: *Client, runtime: *DaemonRuntime, executor: daemon_execution.Executor) void {
         self.runtime = runtime;
         self.pool_executor = executor;
+        runtime.setExecutor(executor);
     }
 
     pub fn clearExecution(self: *Client) void {
+        if (self.runtime) |runtime| runtime.setExecutor(null);
         self.pool_executor = null;
         self.runtime = null;
-        self.pool = null;
+        self.active_driver = null;
     }
 
     pub fn takeRuntime(self: *Client, runtime: *DaemonRuntime) void {
@@ -116,35 +132,46 @@ pub const Client = struct {
         self.test_owned_runtime = runtime;
     }
 
-    pub fn ensurePool(self: *Client) !*rstore.DaemonPool {
-        self.pool_mu.lock();
-        defer self.pool_mu.unlock();
-        if (self.pool) |pool| return pool;
-        const runtime = self.runtime orelse return error.StoreUnavailable;
-        const io = self.io orelse return error.StoreUnavailable;
-        const pool = try runtime.ensurePool(self.allocator, io, self.socket, self.options, self.writes_enabled);
-        self.pool = pool;
-        return pool;
+    fn ensureBackend(self: *Client) !backend.Driver {
+        self.backend_mu.lock();
+        defer self.backend_mu.unlock();
+        if (self.active_driver) |driver| return driver;
+        const driver = self.backend_driver orelse blk: {
+            const runtime = self.runtime orelse return error.StoreUnavailable;
+            const io = self.io orelse return error.StoreUnavailable;
+            break :blk try runtime.configureDaemon(
+                self.allocator,
+                io,
+                self.socket,
+                self.options,
+                self.writes_enabled,
+            );
+        };
+        try driver.start();
+        self.active_driver = driver;
+        return driver;
+    }
+
+    pub fn connection(self: *Client, raw: ?*anyopaque) !backend.Connection {
+        const driver = self.active_driver orelse return error.StoreUnavailable;
+        return driver.connection(raw orelse return error.StoreUnavailable);
     }
 
     pub fn run(self: *Client, work: *const fn (conn: ?*anyopaque, work_ctx: *anyopaque) void, work_ctx: *anyopaque) !void {
-        const pool = try self.ensurePool();
-        if (self.pool_executor) |executor| {
-            executor.runPool(pool, work, work_ctx);
-        } else {
-            pool.submitBlocking(work, work_ctx);
-        }
+        const driver = try self.ensureBackend();
+        return driver.run(work, work_ctx);
     }
 
-    /// Enqueue daemon work without parking the submitter. The caller owns the
-    /// job and its context until the job signals completion.
-    pub fn submit(self: *Client, job: *rstore.DaemonPool.Job) !void {
-        const pool = try self.ensurePool();
-        pool.submit(job);
+    /// Dispatch backend work without requiring the submitter to wait here. A
+    /// driver may finish inline; otherwise the caller keeps the job alive until
+    /// its callback signals completion.
+    pub fn submit(self: *Client, job: *backend.Job) !void {
+        const driver = try self.ensureBackend();
+        return driver.submit(job);
     }
 
-    pub fn captureError(self: *Client, conn: *rstore.DaemonStore) void {
-        const message = conn.last_error orelse return;
+    pub fn captureError(self: *Client, conn: backend.Connection) void {
+        const message = conn.lastError() orelse return;
         self.mu.lock();
         defer self.mu.unlock();
         if (self.last_error_msg != null) return;
