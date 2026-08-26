@@ -110,7 +110,9 @@ pub const Scanner = struct {
     }
 
     fn nextRaw(self: *Scanner) Token {
-        self.skipLayout();
+        if (self.skipLayout()) |comment_start| {
+            return self.makeToken(.error_token, comment_start, self.pos - comment_start);
+        }
 
         if (self.pos >= self.source.len) {
             return self.makeToken(.eof, self.pos, 0);
@@ -248,7 +250,11 @@ pub const Scanner = struct {
         return Token{ .type = tt, .offset = start, .len = len };
     }
 
-    fn skipLayout(self: *Scanner) void {
+    /// Skip whitespace and comments. Returns the offset of an unterminated
+    /// block comment's `/*`, which the caller reports as an invalid token:
+    /// a truncated file must not lex as a shorter valid one (`[ 1 2 /*x]`
+    /// is not `[ 1 2 ]`).
+    fn skipLayout(self: *Scanner) ?u32 {
         while (self.pos < self.source.len) {
             switch (self.source[self.pos]) {
                 '\r' => {
@@ -271,25 +277,22 @@ pub const Scanner = struct {
                 '/' => {
                     if (self.pos + 1 < self.source.len and self.source[self.pos + 1] == '*') {
                         // Block comment
+                        const comment_start = self.pos;
                         const body_start = self.pos + 2;
-                        if (body_start >= self.source.len) {
-                            self.pos = @intCast(self.source.len);
-                            return;
-                        }
-                        if (std.mem.indexOfPos(u8, self.source, body_start, "*/")) |close| {
-                            self.pos = @intCast(close + 2);
-                        } else {
-                            // Unterminated: consume up to (not including) the
-                            // final byte, matching the scalar loop's exit.
-                            self.pos = @intCast(self.source.len - 1);
-                        }
+                        const close = if (body_start < self.source.len)
+                            std.mem.indexOfPos(u8, self.source, body_start, "*/")
+                        else
+                            null;
+                        self.pos = @intCast(if (close) |c| c + 2 else self.source.len);
+                        if (close == null) return comment_start;
                     } else {
-                        return; // single '/' is a token
+                        return null; // single '/' is a token
                     }
                 },
-                else => return,
+                else => return null,
             }
         }
+        return null;
     }
 
     /// SIMD fast path for runs of layout bytes (space/tab/cr/newline).
@@ -705,6 +708,39 @@ test "scanner recognizes dynamic attribute syntax" {
     try std.testing.expectEqual(TokenType.identifier, scanner.next().type);
     try std.testing.expectEqual(TokenType.right_brace, scanner.next().type);
     try std.testing.expectEqual(TokenType.eof, scanner.next().type);
+}
+
+// A truncated file must not lex as a shorter valid one: before this, the
+// unterminated branch left the final byte to be re-lexed, so `[ 1 2 /*x]`
+// evaluated to `[ 1 2 ]` instead of erroring.
+test "scanner: unterminated block comment is an invalid token" {
+    var trunc = Scanner.init("[ 1 2 /*x]");
+    try std.testing.expectEqual(TokenType.left_bracket, trunc.next().type);
+    try std.testing.expectEqual(TokenType.integer, trunc.next().type);
+    try std.testing.expectEqual(TokenType.integer, trunc.next().type);
+    const bad = trunc.next();
+    try std.testing.expectEqual(TokenType.error_token, bad.type);
+    try std.testing.expectEqualStrings("/*x]", trunc.source[bad.offset..][0..bad.len]);
+    try std.testing.expectEqual(TokenType.eof, trunc.next().type);
+
+    // `/*` with nothing after it at all.
+    var bare = Scanner.init("1 /*");
+    try std.testing.expectEqual(TokenType.integer, bare.next().type);
+    try std.testing.expectEqual(TokenType.error_token, bare.next().type);
+    try std.testing.expectEqual(TokenType.eof, bare.next().type);
+}
+
+test "scanner: terminated block comments are layout" {
+    // `/* */` does not nest in Nix: the first `*/` closes, so the trailing
+    // `*/` of `/* /* */` is layout-free source again.
+    var nested = Scanner.init("1 /* /* */ 2");
+    try std.testing.expectEqual(TokenType.integer, nested.next().type);
+    try std.testing.expectEqual(TokenType.integer, nested.next().type);
+    try std.testing.expectEqual(TokenType.eof, nested.next().type);
+
+    var at_eof = Scanner.init("1 /**/");
+    try std.testing.expectEqual(TokenType.integer, at_eof.next().type);
+    try std.testing.expectEqual(TokenType.eof, at_eof.next().type);
 }
 
 test "scanner recognizes search path literals" {
