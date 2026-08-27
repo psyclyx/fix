@@ -416,6 +416,58 @@ test "evaluate minimal derivation builtins" {
     try std.testing.expectEqualStrings("1", preserved_args);
 }
 
+test "deeply nested derivation argument values evaluate" {
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, "let deep = ");
+    for (0..2000) |_| try source.appendSlice(std.testing.allocator, "[ ");
+    try source.append(std.testing.allocator, '1');
+    for (0..2000) |_| try source.appendSlice(std.testing.allocator, " ]");
+    try source.appendSlice(std.testing.allocator,
+        \\; in (builtins.derivation {
+        \\  name = "d";
+        \\  system = "x86_64-linux";
+        \\  builder = ":";
+        \\  attr = deep;
+        \\}).drvPath
+    );
+    _ = try ev.evaluate(source.items);
+}
+
+test "derivation builtin rejects self-referential argument values" {
+    var list_ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer list_ev.deinit();
+    try std.testing.expectError(
+        error.CallDepthExceeded,
+        list_ev.evaluate(
+            \\let r = [ r ];
+            \\in (builtins.derivation {
+            \\  name = "d";
+            \\  system = "x86_64-linux";
+            \\  builder = ":";
+            \\  attr = r;
+            \\}).drvPath
+        ),
+    );
+
+    var attrs_ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer attrs_ev.deinit();
+    try std.testing.expectError(
+        error.CallDepthExceeded,
+        attrs_ev.evaluate(
+            \\let r = { outPath = r; };
+            \\in (builtins.derivation {
+            \\  name = "d";
+            \\  system = "x86_64-linux";
+            \\  builder = ":";
+            \\  attr = r;
+            \\}).drvPath
+        ),
+    );
+}
+
 test "derivation builtin rejects missing required attrs" {
     try std.testing.expectError(
         error.MissingAttribute,
