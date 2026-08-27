@@ -135,11 +135,15 @@ pub const Walker = struct {
             .binding = binding,
             .prev_same_name = prev,
         });
-        // The log only feeds cluster shadow windows: binders pushed while no
-        // cluster is active sit before every window and are never queried.
-        if (self.active.items.len != 0 or cluster != invalid_cluster) {
-            try self.ua.tables.logBinder(name_id, cluster);
-        }
+        // Every binder is logged, including those pushed with no cluster
+        // active. A lambda parameter is exactly that, and a lambda is a float
+        // DESTINATION: its param sits INSIDE the outward window
+        // [entry_mark, header) -- the `.lambda` arm takes `entry_mark` before
+        // pushing the param precisely so the float-out proof can see it. While
+        // those pushes were skipped, a `let` that shadows a parameter was
+        // invisible to that proof and hoisted straight past the binder that
+        // should have blocked it, so the body resolved to the parameter.
+        try self.ua.tables.logBinder(name_id, cluster);
     }
 
     fn popBinders(self: *Walker, to_len: usize) void {
