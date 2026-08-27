@@ -769,6 +769,7 @@ fn evaluationStepBoundary(op: opcode.OpCode) bool {
         .cmp_eq_null,
         .cmp_ne_null,
         .bool_not,
+        .bool_check,
         .jump_false,
         .attrs_new,
         .attrs_merge_strict,

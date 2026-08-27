@@ -444,6 +444,13 @@ fn opNot(vm: *VM, frame: *Frame, code: []const u8, ip: usize, stop_depth: usize)
     return dispatch(vm, frame, code, ip, stop_depth);
 }
 
+fn opCheckBool(vm: *VM, frame: *Frame, code: []const u8, ip: usize, stop_depth: usize) anyerror!void {
+    frame.ip = ip;
+    const a = vm.stack[vm.sp - 1];
+    vm.stack[vm.sp - 1] = Value.boolVal(try expectBool(vm, a));
+    return dispatch(vm, frame, code, ip, stop_depth);
+}
+
 // ---- handlers: control flow ----
 
 fn opJump(vm: *VM, frame: *Frame, code: []const u8, ip: usize, stop_depth: usize) anyerror!void {
@@ -1263,6 +1270,7 @@ fn handlerFor(comptime op: OpCode) HandlerFn {
         .cmp_gt => opGt,
         .cmp_ge => opGte,
         .bool_not => opNot,
+        .bool_check => opCheckBool,
         .jump => opJump,
         .jump_false => opJumpIfFalse,
         .fail => opFailAssertion,

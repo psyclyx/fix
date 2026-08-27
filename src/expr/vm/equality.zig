@@ -92,6 +92,10 @@ pub fn valuesEqualForced(self: *VM, va: Value, vb: Value, seen: *EqualityPairSet
     }
 
     if (isStringComparable(va) and isStringComparable(vb)) {
+        // A path is its own Nix type, so it never equals a string however
+        // the two are spelled; only the string residencies (interned, heap,
+        // with-context) compare by text with each other.
+        if (va.isPath() != vb.isPath()) return false;
         return strings.stringTextEqual(self, va, vb);
     }
     if (va.kind() != vb.kind()) return false;
