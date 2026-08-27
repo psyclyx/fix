@@ -158,11 +158,60 @@ fn gcKeyHashCode(self: *VM, key: Value) !u64 {
     };
 }
 
+/// Nix's ordering classes, as `CompareValues` sees them: numbers order with
+/// numbers, strings with strings, paths with paths, lists lexicographically
+/// with lists, and nothing else orders at all. Strings carrying context are
+/// ordinary strings here — only `path` is set apart.
+const KeyOrder = enum { number, string, path, list, unorderable };
+
+fn keyOrder(key: Value) KeyOrder {
+    if (numeric.isNumeric(key)) return .number;
+    if (key.isPath()) return .path;
+    if (vm_equality.isStringComparable(key)) return .string;
+    if (key.isList()) return .list;
+    return .unorderable;
+}
+
+/// Errors exactly where Nix's `CompareValues` would on this pair, without
+/// computing the ordering itself — the answer only gates the insert.
+fn requireOrderableKeys(self: *VM, key: Value, other: Value) anyerror!void {
+    const order = keyOrder(key);
+    if (order == .unorderable or order != keyOrder(other)) return error.TypeError;
+    if (order != .list) return;
+    return requireOrderableLists(self, key, other);
+}
+
+/// Lists order element-wise, so an element pair can be unorderable in turn.
+/// Equal elements are skipped, so equal-but-unorderable ones (two identical
+/// attrsets) don't spuriously error — same rule as `equality.compareValues`.
+fn requireOrderableLists(self: *VM, key: Value, other: Value) anyerror!void {
+    const left_id = key.asObjectId();
+    const right_id = other.asObjectId();
+    const n = @min(try self.heap.getListLen(left_id), try self.heap.getListLen(right_id));
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        // Re-fetch each element by index: forcing one can move the segment.
+        const left = try vm_force.forceValue(self, try self.heap.getListItem(left_id, i));
+        const right = try vm_force.forceValue(self, try self.heap.getListItem(right_id, i));
+        if (try vm_equality.valuesEqual(self, left, right)) continue;
+        return requireOrderableKeys(self, left, right);
+    }
+}
+
 /// O(1)-amortized deduplication for `genericClosure` keys. Buckets use
 /// `gcKeyHashCode`; membership is confirmed by `valuesEqualForced`.
 pub const GcKeySet = struct {
     index: std.AutoHashMapUnmanaged(u64, std.ArrayListUnmanaged(Value)) = .empty,
     seen: vm_equality.EqualityPairSet = .empty,
+    /// Any one key already in the set, plus its order class. Nix stores keys
+    /// in an ORDERED set, so every insertion into a non-empty set compares
+    /// the new key against at least one resident key and fails when that pair
+    /// has no ordering. A mismatch errors on the spot, so all resident keys
+    /// share one class and a single representative decides exactly as the
+    /// tree does. Caching the class keeps the check to one classification per
+    /// key; only list keys need the representative value itself.
+    representative: ?Value = null,
+    representative_order: KeyOrder = undefined,
 
     pub fn deinit(self: *GcKeySet, allocator: std.mem.Allocator) void {
         var it = self.index.valueIterator();
@@ -174,6 +223,16 @@ pub const GcKeySet = struct {
     /// True if `key` was already present (skip it); otherwise inserts it
     /// and returns false.
     fn contains(self: *GcKeySet, vm: *VM, key: Value) !bool {
+        // Before dedup: Nix orders first, and can only conclude equality from
+        // the very comparison it would have failed on.
+        if (self.representative) |rep| {
+            const order = keyOrder(key);
+            if (order == .unorderable or order != self.representative_order) return error.TypeError;
+            if (order == .list) try requireOrderableLists(vm, key, rep);
+        } else {
+            self.representative = key;
+            self.representative_order = keyOrder(key);
+        }
         const hc = try gcKeyHashCode(vm, key);
         const gop = try self.index.getOrPut(vm.allocator, hc);
         if (!gop.found_existing) gop.value_ptr.* = .empty;
