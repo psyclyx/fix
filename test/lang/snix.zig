@@ -37,6 +37,8 @@ fn errorKindSubs(kind: []const u8) ?[]const []const u8 {
         .{ "UnexpectedArgument", &[_][]const u8{ "unsupported argument", "unexpected argument" } },
         .{ "VariableAlreadyDefined", &[_][]const u8{"already defined"} },
         .{ "DuplicateAttrsKey", &[_][]const u8{ "already defined", "duplicate" } },
+        .{ "UnexpectedContext", &[_][]const u8{ "may not reference derivations", "has a context" } },
+        .{ "Abort", &[_][]const u8{"evaluation aborted"} },
     };
     inline for (map) |entry| {
         if (std.mem.eql(u8, kind, entry[0])) return entry[1];

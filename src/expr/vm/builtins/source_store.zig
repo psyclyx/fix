@@ -60,7 +60,16 @@ pub fn builtinToFile(self: *VM, name_arg: Value, contents_arg: Value) !Value {
         const cv = try contextEntriesForValue(self, contents_value);
         for (cv.names) |entry_name| {
             const ref = self.intern.get(entry_name);
-            if (std.mem.endsWith(u8, ref, ".drv")) return error.DerivationReferenceInToFile;
+            if (std.mem.endsWith(u8, ref, ".drv")) {
+                const message = try std.fmt.allocPrint(
+                    self.allocator,
+                    "files created by builtins.toFile may not reference derivations, but {s} references {s}",
+                    .{ self.intern.get(name_id), ref },
+                );
+                defer self.allocator.free(message);
+                try vm_trace.setErrorMessage(self, message);
+                return error.DerivationReferenceInToFile;
+            }
             try ref_ids.append(self.allocator, entry_name);
         }
     }
