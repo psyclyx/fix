@@ -295,6 +295,69 @@ test "evaluate XML builtin" {
     try std.testing.expectEqualStrings("\"dev,out\"", xml_preserves_string_context);
 }
 
+// `toXML` output is a string programs diff and hash, so its escape set must be
+// Nix's, not XML's: `'` stays literal, a newline becomes `&#xA;` because an XML
+// parser normalises a raw one to a space inside an attribute, and tab/CR stay
+// raw even though they suffer that same normalisation. (Regression: a grub
+// config evaluated differently for want of the newline escape.)
+test "toXML escapes exactly the characters Nix escapes" {
+    const quoteish = try renderForTest("builtins.toXML \"a'b\\\"c&d<e>f\"");
+    defer std.testing.allocator.free(quoteish);
+    try std.testing.expect(std.mem.indexOf(u8, quoteish, "a'b&quot;c&amp;d&lt;e&gt;f") != null);
+
+    const newline = try renderForTest("builtins.toXML \"a\\nb\"");
+    defer std.testing.allocator.free(newline);
+    try std.testing.expect(std.mem.indexOf(u8, newline, "value=\\\"a&#xA;b\\\"") != null);
+
+    // Tab and CR reach the attribute unescaped, and nothing else is touched.
+    const raw = try renderForTest("builtins.toXML \"a\\tb\\rc\"");
+    defer std.testing.allocator.free(raw);
+    try std.testing.expect(std.mem.indexOf(u8, raw, "value=\\\"a\\tb\\rc\\\"") != null);
+
+    const plain = try renderForTest("builtins.toXML \"nothing special\"");
+    defer std.testing.allocator.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "value=\\\"nothing special\\\"") != null);
+
+    // Attribute names go through the same escaper.
+    const name = try renderForTest("builtins.toXML { \"a<b\" = 1; }");
+    defer std.testing.allocator.free(name);
+    try std.testing.expect(std.mem.indexOf(u8, name, "<attr name=\\\"a&lt;b\\\">") != null);
+}
+
+// The XML writer recurses on the native stack and streams as it goes, so a
+// cyclic value used to fault (`builtins.toXML`) or write output forever
+// (`--xml`). Each level now counts against max-call-depth, as Nix bounds it.
+test "a cyclic value errors instead of rendering XML forever" {
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    ev.policy.max_call_depth = 64;
+
+    try std.testing.expectError(
+        error.CallDepthExceeded,
+        ev.evaluate("let x = { a = x; }; in builtins.toXML x"),
+    );
+
+    // The lazy `--xml` renderer walks the same writer and needs the same bound.
+    const cyclic_list = try ev.evaluate("let x = [ x ]; in x");
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try std.testing.expectError(
+        error.CallDepthExceeded,
+        ev.writeXmlValue(&out.writer, cyclic_list),
+    );
+}
+
+// Sharing is not a cycle: a subtree reachable by two paths renders at each of
+// them, so the bound must be on depth rather than on identity.
+test "XML renders shared subtrees once per occurrence" {
+    const xml = try renderForTest("let y = { a = 1; }; in builtins.toXML { p = y; q = y; }");
+    defer std.testing.allocator.free(xml);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        std.mem.count(u8, xml, "<int value=\\\"1\\\" />"),
+    );
+}
+
 test "toXML forces undemanded thunks instead of rendering unevaluated" {
     // lazy_shells_visible wraps eager shapes in resolved-but-UNDEMANDED
     // thunks — the same state speculation leaves behind. builtins.toXML is
@@ -401,6 +464,50 @@ test "evaluate regex builtins" {
     const split = try renderForTest("builtins.split \"[^[:alnum:]+._?=-]+\" \"abc///def\"");
     defer std.testing.allocator.free(split);
     try std.testing.expectEqualStrings("[ \"abc\" [ ] \"def\" ]", split);
+}
+
+// A zero-length match used to emit the character it stepped over as an element
+// of its own, so the result carried a string where the alternation demands a
+// capture list — one extra element per empty match.
+test "split returns 2n+1 alternating elements even for zero-length matches" {
+    const empty_match = try renderForTest("builtins.split \"(a*)\" \"b\"");
+    defer std.testing.allocator.free(empty_match);
+    try std.testing.expectEqualStrings("[ \"\" [ \"\" ] \"b\" [ \"\" ] \"\" ]", empty_match);
+
+    const mixed = try renderForTest("builtins.split \"(a*)\" \"abc\"");
+    defer std.testing.allocator.free(mixed);
+    try std.testing.expectEqualStrings(
+        "[ \"\" [ \"a\" ] \"\" [ \"\" ] \"b\" [ \"\" ] \"c\" [ \"\" ] \"\" ]",
+        mixed,
+    );
+
+    const empty_pattern = try renderForTest("builtins.split \"\" \"abc\"");
+    defer std.testing.allocator.free(empty_pattern);
+    try std.testing.expectEqualStrings("[ \"\" [ ] \"a\" [ ] \"b\" [ ] \"c\" [ ] \"\" ]", empty_pattern);
+
+    const greedy = try renderForTest("builtins.split \"a*\" \"baac\"");
+    defer std.testing.allocator.free(greedy);
+    try std.testing.expectEqualStrings("[ \"\" [ ] \"b\" [ ] \"\" [ ] \"c\" [ ] \"\" ]", greedy);
+
+    // The shape itself, over patterns that do and do not match empty: an odd
+    // length with strings at even indices and capture lists at odd ones.
+    const invariant = try renderForTest(
+        \\let
+        \\  wellFormed = pattern: subject:
+        \\    let
+        \\      parts = builtins.split pattern subject;
+        \\      n = builtins.length parts;
+        \\      alternates = i:
+        \\        if builtins.bitAnd i 1 == 0
+        \\        then builtins.isString (builtins.elemAt parts i)
+        \\        else builtins.isList (builtins.elemAt parts i);
+        \\    in builtins.bitAnd n 1 == 1 && builtins.all alternates (builtins.genList (i: i) n);
+        \\in builtins.all (p: builtins.all (wellFormed p) [ "" "b" "abc" "baac" "aaa" "xaybz" ]) [
+        \\  "(a*)" "a*" "" "a" "q" "^a" "a$" "(a)(b)?" "(a|)" "[[:digit:]]*"
+        \\]
+    );
+    defer std.testing.allocator.free(invariant);
+    try std.testing.expectEqualStrings("true", invariant);
 }
 
 test "evaluate control and error builtins" {
