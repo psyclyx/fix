@@ -335,7 +335,17 @@ pub fn builtinFindFile(self: *VM, search_path_arg: Value, name_arg: Value) !Valu
         }
     }
     if (is_corepkgs) return Value.path(try self.intern.intern(corepkgs.fetchurl_path));
-    return error.FileNotFound;
+    // A `<...>` that resolves to nothing is a language-level throw in Nix, not
+    // an I/O failure, so `tryEval` catches it. Reading a file that is genuinely
+    // absent stays FileNotFound and propagates.
+    const message = try std.fmt.allocPrint(
+        self.allocator,
+        "file '{s}' was not found in the Nix search path (add it using $NIX_PATH or -I)",
+        .{name},
+    );
+    defer self.allocator.free(message);
+    try vm_trace.setErrorMessage(self, message);
+    return error.NixThrow;
 }
 
 pub fn findFileCandidate(self: *VM, base: []const u8, prefix: []const u8, name: []const u8) !?[]u8 {
