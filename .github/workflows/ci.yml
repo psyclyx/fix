@@ -6,12 +6,21 @@ on:
 permissions:
   contents: read
 
+# Pushes often land minutes apart while a full run still holds macOS
+# runners (a ~5-slot pool that provisions slowly); superseded runs must
+# release them immediately or runs starve each other for half an hour.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  # One x86_64-linux build feeds every consumer that needs only the BINARY
-  # (12 nixpkgs chunks, the gc detector, both daemon arms) — previously each
-  # of those built fix from a cold zig cache. Consumers run inside the same
-  # pinned nix-shell, so the artifact's dynamic deps (curl/libgit2/glibc
-  # store paths) resolve identically.
+  # One build per (system, optimize) feeds every consumer that needs only
+  # the BINARY (the eval groups, the gc detector, both daemon arms) —
+  # previously each of those built fix from a cold zig cache. Consumers
+  # run inside the same pinned nix-shell, so the artifact's dynamic deps
+  # (curl/libgit2/glibc store paths) resolve identically. Darwin builds
+  # in its own job so a macOS runner drought never blocks the linux
+  # pipeline.
   build:
     name: build / ${{ matrix.system }} ${{ matrix.optimize }}
     runs-on: ${{ matrix.runner }}
@@ -31,29 +40,11 @@ jobs:
             runner: ubuntu-24.04-arm
             optimize: ReleaseFast
             artifact: fix-releasefast-aarch64-linux
-          - system: aarch64-darwin
-            runner: macos-15
-            optimize: ReleaseFast
-            artifact: fix-releasefast-aarch64-darwin
     steps:
       - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v31
-      - id: store
-        uses: ./.github/actions/nix-store-cache
+      - uses: ./.github/actions/setup-nix
         with:
           key: nix-v4-build-${{ matrix.system }}-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
-      - name: Reinstall nix (cold, after wipe)
-        if: steps.store.outputs.wiped == 'true'
-        uses: cachix/install-nix-action@v31
-      - name: Re-disable store optimisation (cold path)
-        if: steps.store.outputs.wiped == 'true'
-        run: |
-          echo "auto-optimise-store = false" | sudo tee -a /etc/nix/nix.conf
-          sudo systemctl restart nix-daemon 2>/dev/null || true
-      - name: Install pinned nixpkgs channel
-        run: |
-          nix-channel --add "$(jq -r '.pins.nixpkgs.url' npins/sources.json)" nixpkgs
-          nix-channel --update nixpkgs
       # Zig caches persist across runs (keyed to HEAD, prefix-restored from
       # the newest prior run). Only the zig builds share these; the nix
       # package build is hermetic by design and must not see them.
@@ -87,6 +78,37 @@ jobs:
         with:
           primary-key: nix-v4-build-${{ matrix.system }}-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
 
+  build-darwin:
+    name: build / aarch64-darwin ReleaseFast
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-nix
+        with:
+          key: nix-v4-build-aarch64-darwin-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
+      - name: Restore zig cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-build-aarch64-darwin-ReleaseFast-${{ github.sha }}
+          restore-keys: |
+            zig-build-aarch64-darwin-ReleaseFast-
+      - name: Build ReleaseFast
+        timeout-minutes: 20
+        run: |
+          nix-shell --run 'zig build -Doptimize=ReleaseFast -Dcpu=baseline --summary all'
+          cp zig-out/bin/fix fix-releasefast-aarch64-darwin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fix-releasefast-aarch64-darwin
+          path: fix-releasefast-aarch64-darwin
+          retention-days: 3
+      - uses: nix-community/cache-nix-action/save@v7
+        with:
+          primary-key: nix-v4-build-aarch64-darwin-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
+
   test:
     name: ${{ matrix.system }}
     runs-on: ${{ matrix.runner }}
@@ -103,24 +125,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v31
-      - id: store
-        uses: ./.github/actions/nix-store-cache
+      - uses: ./.github/actions/setup-nix
         with:
           key: nix-v4-${{ matrix.system }}-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
-      - name: Reinstall nix (cold, after wipe)
-        if: steps.store.outputs.wiped == 'true'
-        uses: cachix/install-nix-action@v31
-      - name: Re-disable store optimisation (cold path)
-        if: steps.store.outputs.wiped == 'true'
-        run: |
-          echo "auto-optimise-store = false" | sudo tee -a /etc/nix/nix.conf
-          sudo systemctl restart nix-daemon 2>/dev/null || true
-      - name: Install pinned nixpkgs channel
-        run: |
-          nix-channel --add "$(jq -r '.pins.nixpkgs.url' npins/sources.json)" nixpkgs
-          nix-channel --update nixpkgs
-
       # Shared across ALL zig builds in this job (suite test binaries are the
       # bulk of the compile time). The nix package build below is hermetic
       # (its own TMPDIR cache) and intentionally excluded.
@@ -226,80 +233,107 @@ jobs:
         with:
           primary-key: nix-v4-${{ matrix.system }}-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
 
+  # Native runners on purpose: the aarch64 arms are the only place the
+  # weak-memory-ordering code paths (deque/future fences) run on real
+  # hardware — qemu inherits the x86 host's TSO and hides those bugs.
+  # Each platform evaluates its NATIVE universe (outpaths systems = null
+  # -> currentSystem), so oracles are per-system.
+  #
+  # Each group job walks 3 of the 12 universe chunks; per chunk it runs
+  # the default and tight gc-budget lanes, each COLD (compiled-chunk
+  # cache wiped first) and then WARM (the identical eval answered through
+  # the persistent cache's read path). Chunks are grouped because
+  # per-chunk jobs spent more wall time on runner setup than on eval —
+  # and 72 of them starved the runner pools.
   nixpkgs-eval:
-    # Native runners on purpose: the aarch64 arms are the only place the
-    # weak-memory-ordering code paths (deque/future fences) run on real
-    # hardware — qemu inherits the x86 host's TSO and hides those bugs.
-    # Each platform evaluates its NATIVE universe (outpaths systems = null
-    # -> currentSystem), so oracles are per-system.
-    name: nixpkgs / ${{ matrix.system }} chunk ${{ matrix.chunk }} (${{ matrix.lane }})
+    name: nixpkgs / ${{ matrix.system }} group ${{ matrix.group }}
     runs-on: ${{ matrix.runner }}
     needs: build
     strategy:
       fail-fast: false
       matrix:
-        chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-        system: [x86_64-linux, aarch64-linux, aarch64-darwin]
-        lane: [default, tight]
+        group: [0, 1, 2, 3]
+        system: [x86_64-linux, aarch64-linux]
         include:
           - system: x86_64-linux
             runner: ubuntu-24.04
           - system: aarch64-linux
             runner: ubuntu-24.04-arm
-          - system: aarch64-darwin
-            runner: macos-15
-          - {system: x86_64-linux, lane: default, budget: 1024}
-          - {system: x86_64-linux, lane: tight, budget: 512}
-          - {system: aarch64-linux, lane: default, budget: 1024}
-          - {system: aarch64-linux, lane: tight, budget: 512}
-          # macos-15 runners have 7 GB RAM; a 1024-budget chunk peaks near
-          # 10 GB, so darwin's lanes sit one rung lower.
-          - {system: aarch64-darwin, lane: default, budget: 512}
-          - {system: aarch64-darwin, lane: tight, budget: 256}
     steps:
       - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v31
-      - id: store
-        uses: ./.github/actions/nix-store-cache
+      - uses: ./.github/actions/setup-nix
         with:
           key: nix-v4-eval-${{ matrix.system }}-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
-      - name: Reinstall nix (cold, after wipe)
-        if: steps.store.outputs.wiped == 'true'
-        uses: cachix/install-nix-action@v31
-      - name: Re-disable store optimisation (cold path)
-        if: steps.store.outputs.wiped == 'true'
-        run: |
-          echo "auto-optimise-store = false" | sudo tee -a /etc/nix/nix.conf
-          sudo systemctl restart nix-daemon 2>/dev/null || true
-      - name: Install pinned nixpkgs channel
-        run: |
-          nix-channel --add "$(jq -r '.pins.nixpkgs.url' npins/sources.json)" nixpkgs
-          nix-channel --update nixpkgs
       - name: Restore oracle cache
         uses: actions/cache@v5
         with:
           path: ~/.cache/fix-nixpkgs-eval
-          key: nixpkgs-oracle-v1-${{ hashFiles('npins/sources.json') }}-${{ matrix.system }}-chunk-${{ matrix.chunk }}
+          key: nixpkgs-oracle-v2-${{ hashFiles('npins/sources.json') }}-${{ matrix.system }}-group-${{ matrix.group }}
       - uses: actions/download-artifact@v8
         with:
           name: fix-releasefast-${{ matrix.system }}
-      - name: Differential eval (cold compile cache)
-        timeout-minutes: 35
+      - name: Differential eval (3 chunks x 2 lanes, cold+warm)
+        timeout-minutes: 45
         run: |
           chmod +x fix-releasefast-${{ matrix.system }}
-          nix-shell --run 'test/nixpkgs/run.sh --chunk ${{ matrix.chunk }}/12 --gc-budget ${{ matrix.budget }} --fix ./fix-releasefast-${{ matrix.system }}'
-      # Identical eval again: the persistent compiled-chunk cache written by
-      # the first run now serves, so the second run answers the same oracle
-      # through the cache read path.
-      - name: Differential eval (warm compile cache)
-        timeout-minutes: 35
-        run: |
-          nix-shell --run 'test/nixpkgs/run.sh --chunk ${{ matrix.chunk }}/12 --gc-budget ${{ matrix.budget }} --fix ./fix-releasefast-${{ matrix.system }}'
+          nix-shell --run '
+            set -euo pipefail
+            for i in 0 1 2; do
+              chunk=$(( 3 * ${{ matrix.group }} + i ))
+              for budget in 1024 512; do
+                rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/fix/chunks"
+                test/nixpkgs/run.sh --chunk $chunk/12 --gc-budget $budget --fix ./fix-releasefast-${{ matrix.system }}
+                test/nixpkgs/run.sh --chunk $chunk/12 --gc-budget $budget --fix ./fix-releasefast-${{ matrix.system }}
+              done
+            done
+          '
       # Last step on purpose: it is skipped when anything above failed, so a
       # broken job can never publish a poisoned store snapshot.
       - uses: nix-community/cache-nix-action/save@v7
         with:
           primary-key: nix-v4-eval-${{ matrix.system }}-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
+
+  # macos-15 runners have 7 GB RAM; a 1024-budget chunk peaks near 10 GB,
+  # so darwin's lanes sit one rung lower (512 default, 256 tight).
+  nixpkgs-eval-darwin:
+    name: nixpkgs / aarch64-darwin group ${{ matrix.group }}
+    runs-on: macos-15
+    needs: build-darwin
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-nix
+        with:
+          key: nix-v4-eval-aarch64-darwin-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
+      - name: Restore oracle cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/fix-nixpkgs-eval
+          key: nixpkgs-oracle-v2-${{ hashFiles('npins/sources.json') }}-aarch64-darwin-group-${{ matrix.group }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: fix-releasefast-aarch64-darwin
+      - name: Differential eval (3 chunks x 2 lanes, cold+warm)
+        timeout-minutes: 45
+        run: |
+          chmod +x fix-releasefast-aarch64-darwin
+          nix-shell --run '
+            set -euo pipefail
+            for i in 0 1 2; do
+              chunk=$(( 3 * ${{ matrix.group }} + i ))
+              for budget in 512 256; do
+                rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/fix/chunks"
+                test/nixpkgs/run.sh --chunk $chunk/12 --gc-budget $budget --fix ./fix-releasefast-aarch64-darwin
+                test/nixpkgs/run.sh --chunk $chunk/12 --gc-budget $budget --fix ./fix-releasefast-aarch64-darwin
+              done
+            done
+          '
+      - uses: nix-community/cache-nix-action/save@v7
+        with:
+          primary-key: nix-v4-eval-aarch64-darwin-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
 
   # GC use-after-free tripwire: chunk 0 at a tight budget was the workload
   # that exposed the w>1 collection races (2026-08: native-handoff result
@@ -313,28 +347,15 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v31
-      - id: store
-        uses: ./.github/actions/nix-store-cache
+      # Restore-only: the x86_64-linux eval jobs own this snapshot key.
+      - uses: ./.github/actions/setup-nix
         with:
-          key: nix-v4-eval-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
-      - name: Reinstall nix (cold, after wipe)
-        if: steps.store.outputs.wiped == 'true'
-        uses: cachix/install-nix-action@v31
-      - name: Re-disable store optimisation (cold path)
-        if: steps.store.outputs.wiped == 'true'
-        run: |
-          echo "auto-optimise-store = false" | sudo tee -a /etc/nix/nix.conf
-          sudo systemctl restart nix-daemon 2>/dev/null || true
-      - name: Install pinned nixpkgs channel
-        run: |
-          nix-channel --add "$(jq -r '.pins.nixpkgs.url' npins/sources.json)" nixpkgs
-          nix-channel --update nixpkgs
+          key: nix-v4-eval-x86_64-linux-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
       - name: Restore oracle cache
         uses: actions/cache@v5
         with:
           path: ~/.cache/fix-nixpkgs-eval
-          key: nixpkgs-oracle-v1-${{ hashFiles('npins/sources.json') }}-x86_64-linux-chunk-0
+          key: nixpkgs-oracle-v2-${{ hashFiles('npins/sources.json') }}-x86_64-linux-group-0
       - uses: actions/download-artifact@v8
         with:
           name: fix-releasesafe-x86_64-linux
@@ -354,31 +375,10 @@ jobs:
         implementation: [cppnix, lix]
     steps:
       - uses: actions/checkout@v6
-      - name: Install CppNix
-        if: matrix.implementation == 'cppnix'
-        uses: cachix/install-nix-action@v31
-      - name: Install Lix
-        if: matrix.implementation == 'lix'
-        uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d # v2026-06-15
-      - id: store
-        uses: ./.github/actions/nix-store-cache
+      - uses: ./.github/actions/setup-nix
         with:
           key: daemon-v4-${{ matrix.implementation }}-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
-      - name: Reinstall CppNix (cold, after wipe)
-        if: matrix.implementation == 'cppnix' && steps.store.outputs.wiped == 'true'
-        uses: cachix/install-nix-action@v31
-      - name: Reinstall Lix (cold, after wipe)
-        if: matrix.implementation == 'lix' && steps.store.outputs.wiped == 'true'
-        uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d # v2026-06-15
-      - name: Re-disable store optimisation (cold path)
-        if: steps.store.outputs.wiped == 'true'
-        run: |
-          echo "auto-optimise-store = false" | sudo tee -a /etc/nix/nix.conf
-          sudo systemctl restart nix-daemon 2>/dev/null || true
-      - name: Install pinned nixpkgs channel
-        run: |
-          nix-channel --add "$(jq -r '.pins.nixpkgs.url' npins/sources.json)" nixpkgs
-          nix-channel --update nixpkgs
+          installer: ${{ matrix.implementation }}
       - name: Report daemon implementation
         run: nix --version
       - uses: actions/download-artifact@v8

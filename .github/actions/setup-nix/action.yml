@@ -1,0 +1,86 @@
+name: setup nix
+description: >
+  The whole per-job nix preamble: install a nix flavor, restore a /nix
+  snapshot, and install the pinned nixpkgs channel. Restoring self-heals
+  by DEFAULT: store optimisation is disabled first (an optimised store is
+  a hard-link farm into /nix/store/.links; snapshots archive files AS
+  those links and the restore cannot resolve them against a fresh install
+  — the deterministic "corrupt cache" class), then the restored store is
+  probed cheaply and wiped ENTIRELY on any anomaly, followed by a cold
+  reinstall. A cache problem may cost a job minutes; it must never fail
+  one. Saving a snapshot stays with the caller: the save must be the
+  job's LAST step so a broken job never publishes a poisoned snapshot,
+  and composite actions cannot schedule that.
+inputs:
+  key:
+    description: cache-nix-action primary key
+    required: true
+  installer:
+    description: "nix flavor to install: cppnix or lix"
+    required: false
+    default: cppnix
+runs:
+  using: composite
+  steps:
+    - name: Install CppNix
+      if: ${{ inputs.installer == 'cppnix' }}
+      uses: cachix/install-nix-action@v31
+    - name: Install Lix
+      if: ${{ inputs.installer == 'lix' }}
+      uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d # v2026-06-15
+    - name: Disable store optimisation (snapshots need regular files)
+      shell: bash
+      run: |
+        echo "auto-optimise-store = false" | sudo tee -a /etc/nix/nix.conf
+        sudo systemctl restart nix-daemon 2>/dev/null || true
+    - uses: nix-community/cache-nix-action/restore@v7
+      with:
+        primary-key: ${{ inputs.key }}
+    - name: Validate restored store (wipe on any anomaly)
+      id: probe
+      shell: bash
+      run: |
+        set +e
+        probe() {
+          sudo systemctl restart nix-daemon 2>/dev/null || true
+          timeout 120 nix-store --verify >/dev/null 2>&1 || return 1
+          timeout 60 nix-instantiate --eval -E '1 + 1' >/dev/null 2>&1 || return 1
+          return 0
+        }
+        if probe; then
+          echo "restored store validated"
+          echo "wiped=false" >> "$GITHUB_OUTPUT"
+        elif [[ "$(uname)" == "Darwin" ]]; then
+          # macOS: /nix is a synthetic-firmlink volume that cannot be
+          # rm -rf'd. No self-heal there — proceed with the restored store
+          # (status quo; the corruption class has only ever hit Linux/lix).
+          echo "restored store failed validation on darwin — proceeding as-is (no wipe possible)"
+          echo "wiped=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "restored store failed validation — discarding for a cold reinstall"
+          # Full installer footprint: /nix alone is not enough — installers
+          # refuse to merge onto a leftover /etc/nix/nix.conf, and stale
+          # daemon units point into the removed store.
+          sudo systemctl stop nix-daemon.socket nix-daemon 2>/dev/null || true
+          sudo rm -rf /nix /etc/nix
+          sudo rm -f /etc/systemd/system/nix-daemon.service /etc/systemd/system/nix-daemon.socket
+          sudo systemctl daemon-reload 2>/dev/null || true
+          echo "wiped=true" >> "$GITHUB_OUTPUT"
+        fi
+    - name: Reinstall CppNix (cold, after wipe)
+      if: ${{ steps.probe.outputs.wiped == 'true' && inputs.installer == 'cppnix' }}
+      uses: cachix/install-nix-action@v31
+    - name: Reinstall Lix (cold, after wipe)
+      if: ${{ steps.probe.outputs.wiped == 'true' && inputs.installer == 'lix' }}
+      uses: samueldr/lix-gha-installer-action@a0fee77b2a98bb7c5c0ed7ae6d6ad4903dbdad0d # v2026-06-15
+    - name: Re-disable store optimisation (cold path)
+      if: ${{ steps.probe.outputs.wiped == 'true' }}
+      shell: bash
+      run: |
+        echo "auto-optimise-store = false" | sudo tee -a /etc/nix/nix.conf
+        sudo systemctl restart nix-daemon 2>/dev/null || true
+    - name: Install pinned nixpkgs channel
+      shell: bash
+      run: |
+        nix-channel --add "$(jq -r '.pins.nixpkgs.url' npins/sources.json)" nixpkgs
+        nix-channel --update nixpkgs
