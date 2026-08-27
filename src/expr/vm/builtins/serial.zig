@@ -22,6 +22,7 @@ const strings = @import("strings.zig");
 const string_context = @import("string_context.zig");
 const vm_force = @import("../force.zig");
 const vm_strings = @import("../strings.zig");
+const equality = @import("../equality.zig");
 
 const appendContextEntry = string_context.appendContextEntry;
 const coerceAttrsToStringValue = strings.coerceAttrsToStringValue;
@@ -240,7 +241,10 @@ pub fn builtinToXML(self: *VM, arg: Value) !Value {
     var context: std.ArrayListUnmanaged(heap_mod.AttrEntry) = .empty;
     defer context.deinit(self.allocator);
 
-    try vm_force.forceDeep(self, arg);
+    // No deep force first: `.strict` forces each value as the walk reaches it,
+    // which is how Nix does it and is what lets the `<repeated />` short-circuit
+    // work at all. Deep-forcing up front walks a derivation's out/all
+    // self-reference before the writer can collapse it.
     try writeXmlDocument(self, &out.writer, try vm_force.forceValue(self, arg), &context, .strict);
 
     const text = try out.toOwnedSlice();
@@ -263,6 +267,13 @@ pub fn writeLazyXmlValue(self: *VM, writer: *std.Io.Writer, value: Value) !void 
 /// cached string that the real demander then observes.
 const XmlMode = enum { strict, lazy };
 
+/// Derivations already expanded in this document, keyed by `drvPath`. A
+/// derivation reached a second time renders as `<repeated />` instead of its
+/// attrs, which is what stops the `out`/`all` self-reference every derivation
+/// carries from recursing forever. Document-scoped, as in Nix: two occurrences
+/// of one derivation collapse even when neither encloses the other.
+const DrvsSeen = std.AutoHashMapUnmanaged(InternId, void);
+
 fn writeXmlDocument(
     self: *VM,
     writer: *std.Io.Writer,
@@ -270,8 +281,10 @@ fn writeXmlDocument(
     context: ?*std.ArrayListUnmanaged(heap_mod.AttrEntry),
     mode: XmlMode,
 ) !void {
+    var drvs_seen: DrvsSeen = .empty;
+    defer drvs_seen.deinit(self.allocator);
     try writer.writeAll("<?xml version='1.0' encoding='utf-8'?>\n<expr>\n");
-    try writeXmlValue(self, writer, value, 1, context, mode);
+    try writeXmlValue(self, writer, value, 1, context, mode, &drvs_seen);
     try writer.writeAll("</expr>\n");
 }
 
@@ -282,6 +295,7 @@ fn writeXmlValue(
     depth: usize,
     context: ?*std.ArrayListUnmanaged(heap_mod.AttrEntry),
     mode: XmlMode,
+    drvs_seen: *DrvsSeen,
 ) anyerror!void {
     // A cyclic value (`let x = { a = x; }; in x`) has no other bound: the walk
     // below recurses on the native stack and the writer keeps producing output,
@@ -336,8 +350,8 @@ fn writeXmlValue(
             try writeXmlEscaped(writer, self.intern.get(forced.asInternId()));
             try writer.writeAll("\" />\n");
         },
-        .list => try writeXmlList(self, writer, forced.asObjectId(), depth, context, mode),
-        .attrs => try writeXmlAttrs(self, writer, forced.asObjectId(), depth, context, mode),
+        .list => try writeXmlList(self, writer, forced.asObjectId(), depth, context, mode, drvs_seen),
+        .attrs => try writeXmlAttrs(self, writer, forced.asObjectId(), depth, context, mode, drvs_seen),
         .closure => try writeXmlFunction(self, writer, forced, depth),
         .builtin, .builtin_closure, .partial_app => try writer.writeAll("<function />\n"),
         .thunk => unreachable,
@@ -369,6 +383,7 @@ fn writeXmlList(
     depth: usize,
     context: ?*std.ArrayListUnmanaged(heap_mod.AttrEntry),
     mode: XmlMode,
+    drvs_seen: *DrvsSeen,
 ) !void {
     // GC: keep the bare list id live across the child force-walk below, plus the
     // accumulated `context` values (heap objects not on the VM stack).
@@ -380,7 +395,7 @@ fn writeXmlList(
     try writer.writeAll("<list>\n");
     const n = try self.heap.getListLen(id);
     var i: usize = 0;
-    while (i < n) : (i += 1) try writeXmlValue(self, writer, try self.heap.getListItem(id, i), depth + 1, context, mode);
+    while (i < n) : (i += 1) try writeXmlValue(self, writer, try self.heap.getListItem(id, i), depth + 1, context, mode, drvs_seen);
     try writeXmlIndent(writer, depth);
     try writer.writeAll("</list>\n");
 }
@@ -392,6 +407,7 @@ fn writeXmlAttrs(
     depth: usize,
     context: ?*std.ArrayListUnmanaged(heap_mod.AttrEntry),
     mode: XmlMode,
+    drvs_seen: *DrvsSeen,
 ) !void {
     // GC: `sorted` holds attr-entry values reachable only via the attrs object;
     // keep it live across the per-entry force-walk below, plus the accumulated
@@ -404,18 +420,92 @@ fn writeXmlAttrs(
     const sorted = try sortedAttrEntries(self, Value.attrs(id));
     defer self.allocator.free(sorted);
 
+    if (try xmlDerivationHeader(self, id, mode)) |drv| {
+        try writer.writeAll("<derivation");
+        if (drv.drv_path) |p| {
+            try writer.writeAll(" drvPath=\"");
+            try writeXmlEscaped(writer, self.intern.get(p));
+            try writer.writeAll("\"");
+        }
+        if (drv.out_path) |p| {
+            try writer.writeAll(" outPath=\"");
+            try writer.writeAll(self.intern.get(p));
+            try writer.writeAll("\"");
+        }
+        try writer.writeAll(">\n");
+        // Expand once per document. Without a drvPath there is nothing to key
+        // the identity on, so Nix collapses it too rather than risk recursing.
+        const expand = if (drv.drv_path) |p| (try drvs_seen.fetchPut(self.allocator, p, {})) == null else false;
+        if (expand) {
+            try writeXmlAttrEntries(self, writer, sorted, depth, context, mode, drvs_seen);
+        } else {
+            try writeXmlIndent(writer, depth + 1);
+            try writer.writeAll("<repeated />\n");
+        }
+        try writeXmlIndent(writer, depth);
+        try writer.writeAll("</derivation>\n");
+        return;
+    }
+
     try writer.writeAll("<attrs>\n");
+    try writeXmlAttrEntries(self, writer, sorted, depth, context, mode, drvs_seen);
+    try writeXmlIndent(writer, depth);
+    try writer.writeAll("</attrs>\n");
+}
+
+fn writeXmlAttrEntries(
+    self: *VM,
+    writer: *std.Io.Writer,
+    sorted: []const heap_mod.AttrEntry,
+    depth: usize,
+    context: ?*std.ArrayListUnmanaged(heap_mod.AttrEntry),
+    mode: XmlMode,
+    drvs_seen: *DrvsSeen,
+) !void {
     for (sorted) |entry| {
         try writeXmlIndent(writer, depth + 1);
         try writer.writeAll("<attr name=\"");
         try writeXmlEscaped(writer, self.intern.get(entry.name));
         try writer.writeAll("\">\n");
-        try writeXmlValue(self, writer, entry.value, depth + 2, context, mode);
+        try writeXmlValue(self, writer, entry.value, depth + 2, context, mode, drvs_seen);
         try writeXmlIndent(writer, depth + 1);
         try writer.writeAll("</attr>\n");
     }
-    try writeXmlIndent(writer, depth);
-    try writer.writeAll("</attrs>\n");
+}
+
+const XmlDerivation = struct { drv_path: ?InternId, out_path: ?InternId };
+
+/// A `<derivation>` header for an attrset carrying `type = "derivation"`, or
+/// null for an ordinary attrset. `drvPath`/`outPath` are omitted individually
+/// when absent or non-string, as in Nix -- the element is still a
+/// `<derivation>`, since the `type` attr is what decides that.
+fn xmlDerivationHeader(self: *VM, id: ObjectId, mode: XmlMode) !?XmlDerivation {
+    const type_id = try self.intern.intern("type");
+    if (!try equality.attrsHaveDerivationType(self, id, type_id)) return null;
+    return .{
+        .drv_path = try xmlStringAttr(self, id, "drvPath", mode),
+        .out_path = try xmlStringAttr(self, id, "outPath", mode),
+    };
+}
+
+/// The text of a string-valued attr, interned, or null when it is absent, not
+/// a string, or (under `lazy`) not yet evaluated -- a lazy render must not
+/// force a thunk just to label the element.
+fn xmlStringAttr(self: *VM, id: ObjectId, name: []const u8, mode: XmlMode) !?InternId {
+    const name_id = try self.intern.intern(name);
+    const raw = self.heap.getAttrValue(id, name_id) catch |err| switch (err) {
+        error.MissingAttribute => return null,
+        else => return err,
+    };
+    const forced = switch (mode) {
+        .strict => try vm_force.forceValue(self, raw),
+        .lazy => (try xmlVisibleValue(self, raw)) orelse return null,
+    };
+    return switch (forced.kind()) {
+        .string, .path => forced.asInternId(),
+        .string_context, .heap_string => try self.intern.intern(try vm_strings.stringBytes(self, forced)),
+        else => null,
+    };
 }
 
 /// Render a user closure as Nix does under `--xml`: `<function>` wrapping a

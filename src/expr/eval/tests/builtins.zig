@@ -347,6 +347,28 @@ test "a cyclic value errors instead of rendering XML forever" {
     );
 }
 
+// A derivation's `out`/`all` point back at the derivation, so the walk only
+// terminates because the second occurrence collapses. Nix renders it as a
+// `<derivation>` element carrying `<repeated />`, keyed on drvPath.
+test "toXML renders a derivation once and repeats the back-references" {
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+
+    const xml = try renderForTest(
+        \\builtins.toXML (derivation { name = "test"; builder = "/bin/sh"; system = "x86_64-linux"; })
+    );
+    defer std.testing.allocator.free(xml);
+
+    // Expanded once, with the drvPath/outPath header...
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<derivation drvPath=\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "outPath=\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, xml, "<attr name=\\\"drvAttrs\\\">") != null);
+
+    // ...and the `out` and `all` back-references collapsed rather than walked.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, xml, "<repeated />"));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, xml, "<derivation drvPath="));
+}
+
 // Sharing is not a cycle: a subtree reachable by two paths renders at each of
 // them, so the bound must be on depth rather than on identity.
 test "XML renders shared subtrees once per occurrence" {
