@@ -658,7 +658,14 @@ const Line = struct {
     n: usize = 0,
     buf: [1024]u8 = undefined,
     used: usize = 0,
-    overflowed: bool = false,
+    /// A token or its text did not fit. The line renders as much as it holds
+    /// and ends in `…` (`sealTruncation`) — a debugger that refuses to print
+    /// the program because one line is wide is worse than a shortened line.
+    truncated: bool = false,
+    /// Byte extent of tokens dropped for want of a slot. `total` folds it back
+    /// in: the caller advances its instruction offset by `total`, so losing the
+    /// display text must not lose the bytes that text stood for.
+    dropped_extent: u16 = 0,
     /// Token index where the `;` comment starts, if any. The renderer pads the
     /// tokens before it out to `field_comment_col` so comment semicolons align.
     comment_tok: ?usize = null,
@@ -669,12 +676,13 @@ const Line = struct {
         self.n = 0;
         self.used = 0;
         self.comment_tok = null;
-        self.overflowed = false;
+        self.truncated = false;
+        self.dropped_extent = 0;
     }
 
     fn store(self: *Line, comptime fmt: []const u8, args: anytype) []const u8 {
         const s = std.fmt.bufPrint(self.buf[self.used..], fmt, args) catch {
-            self.overflowed = true;
+            self.truncated = true;
             return self.buf[self.used..self.used];
         };
         self.used += s.len;
@@ -683,15 +691,26 @@ const Line = struct {
 
     fn append(self: *Line, tok: Tok) void {
         if (self.n == self.toks.len) {
-            self.overflowed = true;
+            self.dropTok(tok);
             return;
         }
         self.toks[self.n] = tok;
         self.n += 1;
     }
 
-    fn validate(self: *const Line) !void {
-        if (self.overflowed) return error.DisassemblyLineTooLong;
+    fn dropTok(self: *Line, tok: Tok) void {
+        self.truncated = true;
+        if (tok.byte_off + tok.len > self.dropped_extent) self.dropped_extent = tok.byte_off + tok.len;
+    }
+
+    /// Mark a truncated line: the trailing token becomes `…`, the same mark
+    /// `writeEscapedSnippet` and the under-count guard row use for elided
+    /// content. The `…` text is static rather than stored, since a line that
+    /// overflowed `buf` has no room left to format it into.
+    fn sealTruncation(self: *Line) void {
+        if (!self.truncated) return;
+        if (self.n == self.toks.len) self.dropTok(self.toks[self.n - 1]) else self.n += 1;
+        self.toks[self.n - 1] = .{ .text = "…" };
     }
 
     /// Dim structural text (brackets, separators, `chunk `), consumes no bytes.
@@ -732,7 +751,7 @@ const Line = struct {
         self.glue("]", .{});
     }
     fn total(self: *const Line) u16 {
-        var m: u16 = 0;
+        var m: u16 = self.dropped_extent;
         for (self.toks[0..self.n]) |t| {
             if (t.byte_off + t.len > m) m = t.byte_off + t.len;
         }
@@ -798,7 +817,7 @@ fn writeTreeGuide(writer: *std.Io.Writer, rgb: [3]u8, kind: GuideKind, bg: ?[3]u
 /// row (a continuous gutter) but the interpretation only on the first. `seq` is
 /// the running per-instruction color counter (shared with the mnemonic).
 fn emitLine(writer: *std.Io.Writer, code: []const u8, off: *usize, line: *Line, seq: *usize, guides: []const [3]u8, last_mask: u8, bg: ?[3]u8, env: Env) !void {
-    try line.validate();
+    line.sealTruncation();
     const base = off.*;
     const total = line.total();
     line.paint(seq, env.color_depth);
@@ -1247,7 +1266,7 @@ fn headInterp(l: *Line, f: Operand, chunk: *const Chunk, code: []const u8, off: 
 /// colored to match) then the mnemonic and the inline head operand. `head` is
 /// from `buildHead`; `head_len` its operand byte count.
 fn emitMnemonicHead(writer: *std.Io.Writer, code: []const u8, start: usize, op: OpCode, head: *Line, head_len: u16, seq: *usize, bg: ?[3]u8, env: Env) !void {
-    try head.validate();
+    head.sealTruncation();
     head.paint(seq, env.color_depth);
     if (env.show_bytes) {
         var c: u16 = 0;
@@ -2347,15 +2366,57 @@ test "canonical store references and half-open ranges" {
     try std.testing.expectEqualStrings("ab中…", out.written());
 }
 
-test "operand lines report capacity overflow instead of truncating" {
+test "operand lines truncate to an ellipsis instead of failing" {
     var line: Line = undefined;
     line.reset();
     for (0..line.toks.len + 1) |_| line.glue("x", .{});
-    try std.testing.expectError(error.DisassemblyLineTooLong, line.validate());
+    line.sealTruncation();
+    try std.testing.expectEqual(line.toks.len, line.n);
+    try std.testing.expectEqualStrings("…", line.toks[line.n - 1].text);
 
+    // Text overflow: the group's own text is lost but its byte extent is not,
+    // so the caller still steps over every byte the instruction owns.
     line.reset();
-    line.glue("{s}", .{[_]u8{'x'} ** (line.buf.len + 1)});
-    try std.testing.expectError(error.DisassemblyLineTooLong, line.validate());
+    line.group(0, 3, "{s}", .{"abc"});
+    line.group(3, 4, "{s}", .{[_]u8{'x'} ** (line.buf.len + 1)});
+    line.sealTruncation();
+    try std.testing.expectEqual(@as(u16, 7), line.total());
+    try std.testing.expectEqualStrings("…", line.toks[line.n - 1].text);
+}
+
+test "an over-long attribute path disassembles truncated rather than aborting" {
+    const allocator = std.testing.allocator;
+    var intern = try InternTable.init(allocator);
+    defer intern.deinit();
+
+    var builder = try ChunkBuilder.init(allocator);
+    defer builder.deinit(allocator);
+
+    // 11 segments: one past what a Line's token budget holds, since each
+    // segment costs a name token plus the `.` separating it from the last.
+    const segments = 11;
+    try builder.writeOp(allocator, .attr_has_path);
+    try builder.writeByte(allocator, segments);
+    for (0..segments) |i| {
+        var name: [2]u8 = .{ 'a' + @as(u8, @intCast(i)), 0 };
+        try builder.writeU16(allocator, @intCast(try intern.intern(name[0..1])));
+    }
+    try builder.writeOp(allocator, .ret);
+    try builder.writeOp(allocator, .halt);
+
+    var chunk = try builder.finish(allocator, 0);
+    defer chunk.deinit(allocator);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try writeChunk(allocator, &out.writer, null, &chunk, .{ .intern = &intern }, .{});
+    const text = out.written();
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "attr_has_path") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "…") != null);
+    // The instructions after the long line still print.
+    try std.testing.expect(std.mem.indexOf(u8, text, "ret") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "halt") != null);
 }
 
 test "value digests use canonical location-first references" {

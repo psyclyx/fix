@@ -381,6 +381,20 @@ test "duplicate let bindings raise a parse error instead of panicking" {
     try testing.expectError(error.ParseError, ev.evaluate("let x = 1; x = 2; in x"));
 }
 
+test "scope nesting past a byte's range compiles instead of wrapping the depth counter" {
+    var ev = try Engine.init(testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    // Every `with` body opens a lexical scope, and Nix nests them without a
+    // ceiling. When `scope_depth` was a u8 the 256th increment overflowed
+    // (Debug) or wrapped, leaving `endScope` popping locals against a bogus
+    // depth (ReleaseFast).
+    const deep = try ev.evaluate("with { a = 1; }; " ** 300 ++ "42");
+    try testing.expectEqual(@as(i64, 42), deep.asInt());
+    // Resolving a name THROUGH the chain is bounded separately — `with_lookup`
+    // encodes its scope count in one byte — and must stay a clean error.
+    try testing.expectError(error.TooManyWithScopes, ev.evaluate("with { a = 1; }; " ** 256 ++ "a"));
+}
+
 test "dynamic-name bindings move only within an unchanged with-chain" {
     var ev = try Engine.init(testing.allocator, .{ .worker_count = 0 });
     defer ev.deinit();

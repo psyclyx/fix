@@ -113,7 +113,7 @@ pub fn compileWithTail(self: *Compiler, node: *const Node) anyerror!void {
 pub fn compileWithBody(self: *Compiler, node: *const Node, tail_body: bool) anyerror!void {
     const with_node = node.data.with_expr;
 
-    scope.beginScope(self);
+    try scope.beginScope(self);
 
     const scope_slot = try scope.declareLocal(self, "", try self.intern.intern(""));
     try thunks.compileThunk(self, with_node.attr_set);

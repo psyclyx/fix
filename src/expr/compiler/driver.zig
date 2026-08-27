@@ -77,7 +77,7 @@ fn compileAndFinish(self: *Compiler, node: *const Node, scope_value: ?Value) !vo
 }
 
 fn compileAmbientScope(self: *Compiler, node: *const Node, scope_value: Value) !void {
-    scope.beginScope(self);
+    try scope.beginScope(self);
 
     const scope_slot = try scope.declareLocal(self, "", try self.intern.intern(""));
     try self.builder.emitConstant(self.allocator, scope_value);

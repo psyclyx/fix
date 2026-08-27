@@ -100,7 +100,7 @@ fn compileMixedRecursiveAttrEntryViews(self: *Compiler, entries: []const AttrEnt
     var initial = try attrEntryGroups(self, static_entries);
     defer initial.deinit(self.allocator);
 
-    scope.beginScope(self);
+    try scope.beginScope(self);
     errdefer scope.endScope(self);
 
     try declareRecursiveAttrLocals(self, initial.groups);
@@ -409,7 +409,7 @@ fn groupIndexLessThan(groups: []const AttrEntryGroup, lhs: u32, rhs: u32) bool {
 }
 
 fn compileRecursiveAttrEntries(self: *Compiler, entries: []const AttrEntryView) anyerror!void {
-    scope.beginScope(self);
+    try scope.beginScope(self);
     errdefer scope.endScope(self);
 
     // Recursive names must exist as cells before the inherit-source thunk is
@@ -718,7 +718,7 @@ fn attrEntryViews(self: *Compiler, entries: []const Node.AttrSetEntry) ![]AttrEn
 fn prepareInheritSources(self: *Compiler, entries: []const AttrEntryView) !?[]AttrEntryView {
     for (entries) |entry| {
         if (entry.inherit_group != 0 and entry.inherit_slot == null) {
-            scope.beginScope(self);
+            try scope.beginScope(self);
             errdefer scope.endScope(self);
             return prepareInheritSourcesInCurrentScope(self, entries);
         }

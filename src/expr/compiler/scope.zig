@@ -13,7 +13,13 @@ const WithScope = compiler_mod.WithScope;
 const with_capture_name = compiler_mod.with_capture_name;
 const InternId = types.InternId;
 
-pub fn beginScope(self: *Compiler) void {
+/// Nesting is bounded only so `scope_depth` cannot wrap: a wrapped depth makes
+/// `endScope` pop the wrong locals, which miscompiles silently in ReleaseFast
+/// rather than failing. The ceiling is set by the counter's width, not by any
+/// property of the language — Nix nests scopes arbitrarily deep, so it must sit
+/// far above anything a real program reaches.
+pub fn beginScope(self: *Compiler) !void {
+    if (self.scope_depth == std.math.maxInt(@TypeOf(self.scope_depth))) return error.TooManyScopes;
     self.scope_depth += 1;
 }
 

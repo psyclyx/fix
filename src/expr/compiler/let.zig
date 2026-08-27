@@ -109,7 +109,7 @@ fn compileLetInBody(self: *Compiler, node: *const Node, tail_body: bool) anyerro
     }
     const let_in = target.data.let_in;
 
-    scope.beginScope(self);
+    try scope.beginScope(self);
 
     var plan = try LetPlan.init(self, let_in.bindings, let_in.body);
     defer plan.deinit(self.allocator);

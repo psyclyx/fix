@@ -13,7 +13,9 @@ const Node = ast.Node;
 pub const Local = struct {
     name: []const u8,
     name_id: InternId,
-    depth: u8,
+    /// Declaring scope's `Compiler.scope_depth` — same width, since `endScope`
+    /// compares the two directly.
+    depth: u16,
     /// Index from frame base on the stack.
     slot: u16,
 };

@@ -114,7 +114,10 @@ pub const Compiler = struct {
     /// speculatively. Deprecated recursive-set overrides use this while their
     /// binding cells are still eligible for the one-time re-point operation.
     suppress_child_speculation: bool,
-    scope_depth: u8,
+    /// Lexical nesting depth. u16 rather than u8 because every `let`, lambda
+    /// body and `with` body opens a scope and Nix accepts such nesting far past
+    /// 255; `beginScope` guards the top of this range.
+    scope_depth: u16,
     slot_count: u16,
     /// Count of attr value bodies deferred during this compile (lazy
     /// per-attr compilation). Tracked on the ROOT compiler (children
