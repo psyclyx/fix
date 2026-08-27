@@ -41,7 +41,7 @@ const appendContextEntry = string_context.appendContextEntry;
 const coerceDerivationStringValue = strings.coerceDerivationStringValue;
 const contextEntriesForValue = string_context.contextEntriesForValue;
 const makeBuiltinThunk = shared.makeBuiltinThunk;
-const jsonAttrsSourceStringValue = serial.jsonAttrsSourceStringValue;
+const jsonAttrsStringValue = serial.jsonAttrsStringValue;
 const isPlainString = strings.isPlainString;
 const isStringLike = strings.isStringLike;
 const sourcePathStringValue = strings.sourcePathStringValue;
@@ -759,7 +759,7 @@ fn appendStructuredJsonValue(
             try out.append(self.allocator, ']');
         },
         .attrs => {
-            if (try jsonAttrsSourceStringValue(self, forced)) |string_value| {
+            if (try jsonAttrsStringValue(self, forced)) |string_value| {
                 try appendStructuredJsonStringValue(self, out, string_value, inputs, owned_strings);
                 return;
             }

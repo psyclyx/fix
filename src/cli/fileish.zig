@@ -40,6 +40,13 @@ pub const Source = struct {
     }
 };
 
+/// An owned copy of the evaluator's working directory, for sources whose text
+/// has no file of its own to sit next to (stdin, `-E`).
+pub fn dupBasePath(ev: *Engine) !?[]u8 {
+    const base = ev.basePath() orelse return null;
+    return try ev.hostAllocator().dupe(u8, base);
+}
+
 /// Resolve and load one fileish argument. Returned file bytes are borrowed
 /// from the evaluator's file cache; stdin is owned. Paths and base paths are
 /// owned so source positions and relative imports remain tied to this input.
@@ -50,8 +57,7 @@ pub fn load(ev: *Engine, io: std.Io, input: []const u8) !Source {
         var stdin = std.Io.File.stdin().readerStreaming(io, &stdin_buffer);
         const text = try stdin.interface.allocRemaining(allocator, .limited(128 << 20));
         errdefer allocator.free(text);
-        const base = if (ev.basePath()) |p| try allocator.dupe(u8, p) else null;
-        return .{ .text = .{ .owned = text }, .base_path = base };
+        return .{ .text = .{ .owned = text }, .base_path = try dupBasePath(ev) };
     }
 
     var path: []u8 = switch (classify(input)) {

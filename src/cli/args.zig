@@ -405,8 +405,9 @@ pub const Opt = enum {
 const Arg = enum {
     /// No value: `--json`. (`--json=x` is an error.)
     flag,
-    /// Optional value, supplied only via `--x=value`; the bare `--x` form is
-    /// valid. Never consumes the next token (avoids swallowing a positional).
+    /// Optional value, supplied via `--x=value`; the bare `--x` form is valid.
+    /// Only consumes the next token when the spec names a closed value set and
+    /// the token is a member (avoids swallowing a positional).
     opt,
     /// One required value: `--x value`, `--x=value`, or short `-Xvalue`.
     req,
@@ -442,6 +443,10 @@ const Spec = struct {
     hidden: bool = false,
     /// Completion class for the first and (for `.req2`) second values.
     complete: [2]CompletionHint = .{ .none, .none },
+    /// The closed value set of an `.opt` option. Naming it lets the
+    /// space-separated `--x word` form parse: no member can be mistaken for a
+    /// positional, and that spelling is what people type.
+    words: []const [:0]const u8 = &.{},
 };
 
 /// Commands that take a source expression and its selectors (everything but the
@@ -528,7 +533,7 @@ const specs = [_]Spec{
     .{ .id = .show_trace, .long = "--show-trace", .help = "show full evaluation traces on error", .show_in = eval_cmds },
     .{ .id = .no_show_trace, .long = "--no-show-trace", .help = "truncate long evaluation traces on error (default)", .show_in = eval_cmds },
     .{ .id = .debugger, .long = "--debugger", .help = "pause into an interactive debugger at builtins.break\n(forces --workers=1)", .show_in = &[_]Cmd{ .eval, .repl } },
-    .{ .id = .color, .long = "--color", .arg = .opt, .metavar = "WHEN", .help = "color diagnostics: auto, always, never", .default_value = "auto", .complete = .{ .color, .none } },
+    .{ .id = .color, .long = "--color", .arg = .opt, .metavar = "WHEN", .help = "color diagnostics: auto, always, never", .default_value = "auto", .complete = .{ .color, .none }, .words = presentation.when_words },
     .{ .id = .no_color, .long = "--no-color", .help = "disable color diagnostics" },
     .{ .id = .progress, .long = "--progress", .help = "write timestamped progress records", .show_in = eval_cmds },
     .{ .id = .no_progress, .long = "--no-progress", .help = "disable evaluation progress", .show_in = eval_cmds },
@@ -863,7 +868,15 @@ pub fn parse(allocator: std.mem.Allocator, args_iter: *std.process.Args.Iterator
         var v1: ?[:0]const u8 = null;
         switch (s.arg) {
             .flag => if (inline_value != null) return error.UnexpectedValue,
-            .opt => v0 = inline_value,
+            .opt => v0 = inline_value orelse blk: {
+                if (s.words.len == 0) break :blk null;
+                const next = args_iter.next() orelse break :blk null;
+                for (s.words) |word| {
+                    if (std.mem.eql(u8, next, word)) break :blk next;
+                }
+                carried = next;
+                break :blk null;
+            },
             .req => v0 = inline_value orelse (args_iter.next() orelse return error.MissingValue),
             .req2 => {
                 v0 = inline_value orelse (args_iter.next() orelse return error.MissingValue);
@@ -1108,6 +1121,35 @@ test "package list returns to ordinary option parsing" {
 
     try std.testing.expectEqualSlices([]const u8, &.{ "hello", "jq" }, options.packages.items);
     try std.testing.expectEqual(presentation.ProgressMode.disabled, options.progress);
+}
+
+test "color mode accepts both attached and separated WHEN words" {
+    const attached = [_][*:0]const u8{ "fix", "--color=never", "-E", "1" };
+    var attached_options = try parseForTest(&attached, .eval);
+    defer attached_options.deinit(std.testing.allocator);
+    try std.testing.expectEqual(presentation.When.never, attached_options.color);
+    try std.testing.expectEqual(@as(usize, 1), attached_options.sources.items.len);
+
+    const separated = [_][*:0]const u8{ "fix", "--color", "never", "-E", "1" };
+    var separated_options = try parseForTest(&separated, .eval);
+    defer separated_options.deinit(std.testing.allocator);
+    try std.testing.expectEqual(presentation.When.never, separated_options.color);
+    try std.testing.expectEqual(@as(usize, 1), separated_options.sources.items.len);
+
+    // A non-member stays a positional, and the bare flag still means "always".
+    const positional = [_][*:0]const u8{ "fix", "--color", "sometimes.nix" };
+    var positional_options = try parseForTest(&positional, .eval);
+    defer positional_options.deinit(std.testing.allocator);
+    try std.testing.expectEqual(presentation.When.always, positional_options.color);
+    try std.testing.expectEqualStrings("sometimes.nix", positional_options.sources.items[0].file);
+
+    const trailing = [_][*:0]const u8{ "fix", "--color" };
+    var trailing_options = try parseForTest(&trailing, .eval);
+    defer trailing_options.deinit(std.testing.allocator);
+    try std.testing.expectEqual(presentation.When.always, trailing_options.color);
+
+    const bad = [_][*:0]const u8{ "fix", "--color=sometimes" };
+    try std.testing.expectError(error.InvalidColorMode, parseForTest(&bad, .eval));
 }
 
 test "progress surface selects enabled or disabled records" {

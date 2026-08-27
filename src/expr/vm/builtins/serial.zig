@@ -25,7 +25,6 @@ const vm_strings = @import("../strings.zig");
 const equality = @import("../equality.zig");
 
 const appendContextEntry = string_context.appendContextEntry;
-const coerceAttrsToStringValue = strings.coerceAttrsToStringValue;
 const coerceStringContextValue = strings.coerceStringContextValue;
 const contextEntriesForValue = string_context.contextEntriesForValue;
 const isPlainString = strings.isPlainString;
@@ -41,7 +40,7 @@ pub fn builtinToJSON(self: *VM, arg: Value) !Value {
     var context: std.ArrayListUnmanaged(heap_mod.AttrEntry) = .empty;
     defer context.deinit(self.allocator);
 
-    try writeJsonValueWithPathMode(self, &out.writer, arg, .source, &context);
+    try writeJsonValueCollectingContext(self, &out.writer, arg, &context);
     const text = try out.toOwnedSlice();
     defer self.allocator.free(text);
     if (comptime prof.enabled) if (self.workerId() == 0)
@@ -50,23 +49,22 @@ pub fn builtinToJSON(self: *VM, arg: Value) !Value {
     return Value.contextString(try self.heap.addContextStringEntries(try self.intern.intern(text), context.items));
 }
 
+/// Serialize as `builtins.toJSON` does, discarding the string context the
+/// coercions produce -- a writer has nowhere to put it.
 pub fn writeJsonValue(self: *VM, writer: *std.Io.Writer, value: Value) !void {
-    try writeJsonValueWithPathMode(self, writer, value, .raw, null);
+    try writeJsonValueCollectingContext(self, writer, value, null);
 }
 
-const JsonPathMode = enum { raw, source };
-
-fn writeJsonValueWithPathMode(
+fn writeJsonValueCollectingContext(
     self: *VM,
     writer: *std.Io.Writer,
     value: Value,
-    path_mode: JsonPathMode,
     context: ?*std.ArrayListUnmanaged(heap_mod.AttrEntry),
 ) !void {
     var seen: std.ArrayListUnmanaged(SeenJsonObject) = .empty;
     defer seen.deinit(self.allocator);
 
-    try writeJsonValueInner(self, writer, value, &seen, path_mode, context);
+    try writeJsonValueInner(self, writer, value, &seen, context);
 }
 
 const SeenJsonObject = shared.SeenJsonObject;
@@ -76,7 +74,6 @@ fn writeJsonValueInner(
     writer: *std.Io.Writer,
     value: Value,
     seen: *std.ArrayListUnmanaged(SeenJsonObject),
-    path_mode: JsonPathMode,
     context: ?*std.ArrayListUnmanaged(heap_mod.AttrEntry),
 ) anyerror!void {
     // GC: the `context` accumulator holds freshly-produced context values (heap
@@ -100,20 +97,15 @@ fn writeJsonValueInner(
         },
         .string, .string_context, .heap_string => try writeJsonStringValue(self, writer, forced, context),
         .path => {
-            switch (path_mode) {
-                .raw => try std.json.Stringify.encodeJsonString(self.intern.get(forced.asInternId()), .{}, writer),
-                .source => {
-                    const string_value = try sourcePathStringValue(self, forced.asInternId());
-                    try writeJsonStringValue(self, writer, string_value, context);
-                },
-            }
+            const string_value = try sourcePathStringValue(self, forced.asInternId());
+            try writeJsonStringValue(self, writer, string_value, context);
         },
-        .list => try writeJsonList(self, writer, forced.asObjectId(), seen, path_mode, context),
+        .list => try writeJsonList(self, writer, forced.asObjectId(), seen, context),
         .attrs => {
-            if (try jsonAttrsStringValue(self, forced, path_mode)) |string_value| {
+            if (try jsonAttrsStringValue(self, forced)) |string_value| {
                 try writeJsonStringValue(self, writer, string_value, context);
             } else {
-                try writeJsonAttrs(self, writer, forced.asObjectId(), seen, path_mode, context);
+                try writeJsonAttrs(self, writer, forced.asObjectId(), seen, context);
             }
         },
         .closure, .builtin, .builtin_closure, .partial_app => return error.TypeError,
@@ -146,15 +138,12 @@ fn writeJsonStringValue(
     }
 }
 
-fn jsonAttrsStringValue(self: *VM, attrs: Value, path_mode: JsonPathMode) !?Value {
+pub fn jsonAttrsStringValue(self: *VM, attrs: Value) !?Value {
     const attrs_id = attrs.asObjectId();
 
     const to_string_id = try self.intern.intern("__toString");
     if (self.heap.getAttrValue(attrs_id, to_string_id)) |_| {
-        return switch (path_mode) {
-            .raw => try coerceAttrsToStringValue(self, attrs),
-            .source => try coerceStringContextValue(self, attrs),
-        };
+        return try coerceStringContextValue(self, attrs);
     } else |err| switch (err) {
         error.MissingAttribute => {},
         else => return err,
@@ -162,18 +151,11 @@ fn jsonAttrsStringValue(self: *VM, attrs: Value, path_mode: JsonPathMode) !?Valu
 
     const out_path_id = try self.intern.intern("outPath");
     if (self.heap.getAttrValue(attrs_id, out_path_id)) |_| {
-        return switch (path_mode) {
-            .raw => try coerceAttrsToStringValue(self, attrs),
-            .source => try coerceStringContextValue(self, attrs),
-        };
+        return try coerceStringContextValue(self, attrs);
     } else |err| switch (err) {
         error.MissingAttribute => return null,
         else => return err,
     }
-}
-
-pub fn jsonAttrsSourceStringValue(self: *VM, attrs: Value) !?Value {
-    return jsonAttrsStringValue(self, attrs, .source);
 }
 
 fn writeJsonList(
@@ -181,7 +163,6 @@ fn writeJsonList(
     writer: *std.Io.Writer,
     id: ObjectId,
     seen: *std.ArrayListUnmanaged(SeenJsonObject),
-    path_mode: JsonPathMode,
     context: ?*std.ArrayListUnmanaged(heap_mod.AttrEntry),
 ) !void {
     if (!try shared.enterJsonObject(self, .list, id, seen)) return error.RecursiveThunk;
@@ -198,7 +179,7 @@ fn writeJsonList(
     var i: usize = 0;
     while (i < n) : (i += 1) {
         if (i > 0) try writer.writeByte(',');
-        try writeJsonValueInner(self, writer, try self.heap.getListItem(id, i), seen, path_mode, context);
+        try writeJsonValueInner(self, writer, try self.heap.getListItem(id, i), seen, context);
     }
     try writer.writeByte(']');
 }
@@ -208,7 +189,6 @@ fn writeJsonAttrs(
     writer: *std.Io.Writer,
     id: ObjectId,
     seen: *std.ArrayListUnmanaged(SeenJsonObject),
-    path_mode: JsonPathMode,
     context: ?*std.ArrayListUnmanaged(heap_mod.AttrEntry),
 ) !void {
     if (!try shared.enterJsonObject(self, .attrs, id, seen)) return error.RecursiveThunk;
@@ -229,7 +209,7 @@ fn writeJsonAttrs(
         if (i > 0) try writer.writeByte(',');
         try std.json.Stringify.encodeJsonString(self.intern.get(entry.name), .{}, writer);
         try writer.writeByte(':');
-        try writeJsonValueInner(self, writer, entry.value, seen, path_mode, context);
+        try writeJsonValueInner(self, writer, entry.value, seen, context);
     }
     try writer.writeByte('}');
 }
