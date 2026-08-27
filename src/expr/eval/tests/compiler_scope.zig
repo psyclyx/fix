@@ -52,6 +52,49 @@ test "a dotted let group referencing a later sibling gives it a cell" {
     try std.testing.expectEqual(@as(i64, 10), result.asInt());
 }
 
+test "sibling let bindings merge through dynamic attrpath prefixes" {
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+
+    // `c.${x} = 1` parses as `c = { ${x} = 1; }`, so both definitions of `c`
+    // are plain leaves rather than dotted tails; they still merge, because
+    // every definition of the root is an attr-set literal.
+    try std.testing.expectEqual(@as(i64, 3), (try ev.evaluate(
+        "let x = \"a\"; y = \"b\"; c.${x} = 1; c.${y} = 2; in c.a + c.b",
+    )).asInt());
+    try std.testing.expectEqual(@as(i64, 6), (try ev.evaluate(
+        "let x = \"a\"; y = \"b\"; z = \"d\"; c.${x} = 1; c.${y} = 2; c.${z} = 3; in c.a + c.b + c.d",
+    )).asInt());
+    // Mixed with a static tail, and with an explicit set literal.
+    try std.testing.expectEqual(@as(i64, 3), (try ev.evaluate(
+        "let x = \"a\"; c.${x} = 1; c.b = 2; in c.a + c.b",
+    )).asInt());
+    try std.testing.expectEqual(@as(i64, 3), (try ev.evaluate(
+        "let x = \"a\"; c.${x} = 1; c = { b = 2; }; in c.a + c.b",
+    )).asInt());
+    try std.testing.expectEqual(@as(i64, 3), (try ev.evaluate(
+        "let c = { a = 1; }; c = { b = 2; }; in c.a + c.b",
+    )).asInt());
+    // A dynamic prefix with its own tail keeps nesting.
+    try std.testing.expectEqual(@as(i64, 3), (try ev.evaluate(
+        "let x = \"a\"; y = \"b\"; c.${x}.q = 1; c.${y} = 2; in c.a.q + c.b",
+    )).asInt());
+}
+
+test "merged dynamic let definitions still reject real redefinitions" {
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+
+    // A non-attr-set definition of the root is a redefinition, not a merge.
+    try std.testing.expectError(error.ParseError, ev.evaluate("let x = \"a\"; c.${x} = 1; c = 2; in c"));
+    try std.testing.expectError(error.ParseError, ev.evaluate("let c = 1; c = 2; in c"));
+    // Keys that only collide at run time are a run-time error, as in Nix.
+    try std.testing.expectError(
+        error.DuplicateAttribute,
+        ev.evaluate("let x = \"a\"; y = \"a\"; c.${x} = 1; c.${y} = 2; in c"),
+    );
+}
+
 // `true`, `false` and `null` are base-environment variables in Nix, not
 // keywords, so an ordinary binder shadows them and they are legal wherever an
 // identifier is — including binder positions a keyword could never reach.
