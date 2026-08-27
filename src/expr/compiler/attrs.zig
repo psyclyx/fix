@@ -224,7 +224,7 @@ fn appendWithSnapshot(self: *Compiler, out: *std.ArrayListUnmanaged(Capture)) !b
 /// deferral-shaped by construction.
 fn isDeferrableBody(node: *const Node) bool {
     return switch (ast.unwrapParens(node).tag) {
-        .integer, .float_val, .string, .path, .search_path, .identifier, .bool_true, .bool_false, .null, .list, .attr_set, .lambda, .lambda_attrs => false,
+        .integer, .float_val, .string, .path, .search_path, .identifier, .list, .attr_set, .lambda, .lambda_attrs => false,
         else => true,
     };
 }

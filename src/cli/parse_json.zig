@@ -278,9 +278,6 @@ const Lowerer = struct {
             .uri => try self.literal("String", .{ .str = self.atomText(n.data.atom) }),
             .search_path => try self.searchPath(n.data.atom),
             .identifier => try self.identifier(self.atomText(n.data.atom)),
-            .bool_true => try self.exprVar("true"),
-            .bool_false => try self.exprVar("false"),
-            .null => try self.exprVar("null"),
 
             .unary_op => try self.unary(n.data.unary),
             .binary_op => try self.binary(n.data.binary),

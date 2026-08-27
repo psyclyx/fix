@@ -268,7 +268,7 @@ const Rewriter = struct {
     /// changed, else a rebuilt copy (span recomputed by `createNode`).
     fn rewriteChildren(self: *Rewriter, node: *const Node) anyerror!*const Node {
         switch (node.tag) {
-            .integer, .float_val, .string, .path, .uri, .search_path, .identifier, .bool_true, .bool_false, .null, .elided => return node,
+            .integer, .float_val, .string, .path, .uri, .search_path, .identifier, .elided => return node,
             .unary_op => {
                 const expr = try self.rewrite(node.data.unary.expr);
                 if (expr == node.data.unary.expr) return node;

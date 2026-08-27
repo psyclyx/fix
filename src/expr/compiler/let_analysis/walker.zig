@@ -374,7 +374,7 @@ pub const Walker = struct {
         const spine_prefix = self.in_apply_func;
         self.in_apply_func = false;
         switch (node.tag) {
-            .integer, .float_val, .bool_true, .bool_false, .null, .uri => {},
+            .integer, .float_val, .uri => {},
             // `<name>` desugars through the `__nixPath` identifier.
             .search_path => try self.refSpecialWord("__nixPath"),
             .string, .path => try self.wordsInSpan(node.data.atom),

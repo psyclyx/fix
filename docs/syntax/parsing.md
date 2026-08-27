@@ -85,7 +85,7 @@ A `Node` is `{ tag: NodeTag, data: Data, span: ?Atom }`. Consumers dispatch on `
 
 The tag families (28 tags):
 
-- **Atoms** (`data = Atom`): `integer, float_val, string, path, uri, search_path, identifier, bool_true, bool_false, null`, plus `elided` (the lazy-parsing placeholder above, holding the unparsed body's span). The atom's bytes still live in `source`; string/path *decoding* is deferred to the compiler via [`string_syntax`](nix-syntax.md) `ParsedLiteral`s.
+- **Atoms** (`data = Atom`): `integer, float_val, string, path, uri, search_path, identifier`, plus `elided` (the lazy-parsing placeholder above, holding the unparsed body's span). The atom's bytes still live in `source`; string/path *decoding* is deferred to the compiler via [`string_syntax`](nix-syntax.md) `ParsedLiteral`s.
 - **Operators**: `unary_op` (`Unary { op, expr }` — `!` or negation), `binary_op` (`Binary { op, left, right }`, 15 ops: add/sub/mul/div, eq/neq, lt/lte/gt/gte, and/or, impl, update, concat).
 - **Functions & binding forms**: `apply` (`Apply { func, arg, pipe }`), `lambda` (`Lambda { param_offset, param_len, body }`), `lambda_attrs` (`*LambdaAttrs { bind_name?, params[], allow_extra, body }`), `let_in` (`LetIn { bindings[], body }`), `with_expr`, `if_else`, `assert`.
 - **Attribute access & sets**: `attr_path` (`AttrPath { root, segments[] }`), `attr_dynamic`, `attr_or`, `has_attr` / `has_attr_mixed`, `attr_set` (`AttrSet { entries[], recursive }`), `list`, `parens`.

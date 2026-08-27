@@ -170,7 +170,7 @@ const Context = struct {
     /// caller may continue demanding the next expression.
     fn walk(self: *Context, node: *const Node, window: Window) anyerror!bool {
         switch (node.tag) {
-            .integer, .float_val, .uri, .bool_true, .bool_false, .null, .lambda, .lambda_attrs => return true,
+            .integer, .float_val, .uri, .lambda, .lambda_attrs => return true,
             .string, .path => {
                 const atom = node.data.atom;
                 return std.mem.indexOf(u8, self.source[atom.offset .. atom.offset + atom.len], "${") == null;

@@ -110,7 +110,9 @@ pub const Scanner = struct {
     }
 
     fn nextRaw(self: *Scanner) Token {
-        self.skipLayout();
+        if (self.skipLayout()) |comment_start| {
+            return self.makeToken(.error_token, comment_start, self.pos - comment_start);
+        }
 
         if (self.pos >= self.source.len) {
             return self.makeToken(.eof, self.pos, 0);
@@ -191,7 +193,11 @@ pub const Scanner = struct {
             },
             '/' => {
                 if (self.match('/')) return self.makeToken(.double_slash, start, 2);
-                if (isPathContinue(self.peek()) and !isDigit(self.peek())) return self.lexPath(start);
+                // Absolute path (flex `PATH` with an empty leading component):
+                // the first segment is `{PATH_CHAR}+` like every other one, so
+                // it may start with a digit — `/123abc`, `/1/2`. The `/` is
+                // division only when what follows it is not a segment char.
+                if (isPathContinue(self.peek())) return self.lexPath(start);
                 // Absolute path opening with an interpolation: `/${x}`.
                 if (self.peek() == '$' and self.peekAhead(1) == '{') return self.lexPath(start);
                 return self.makeToken(.slash, start, 1);
@@ -244,7 +250,11 @@ pub const Scanner = struct {
         return Token{ .type = tt, .offset = start, .len = len };
     }
 
-    fn skipLayout(self: *Scanner) void {
+    /// Skip whitespace and comments. Returns the offset of an unterminated
+    /// block comment's `/*`, which the caller reports as an invalid token:
+    /// a truncated file must not lex as a shorter valid one (`[ 1 2 /*x]`
+    /// is not `[ 1 2 ]`).
+    fn skipLayout(self: *Scanner) ?u32 {
         while (self.pos < self.source.len) {
             switch (self.source[self.pos]) {
                 '\r' => {
@@ -267,25 +277,22 @@ pub const Scanner = struct {
                 '/' => {
                     if (self.pos + 1 < self.source.len and self.source[self.pos + 1] == '*') {
                         // Block comment
+                        const comment_start = self.pos;
                         const body_start = self.pos + 2;
-                        if (body_start >= self.source.len) {
-                            self.pos = @intCast(self.source.len);
-                            return;
-                        }
-                        if (std.mem.indexOfPos(u8, self.source, body_start, "*/")) |close| {
-                            self.pos = @intCast(close + 2);
-                        } else {
-                            // Unterminated: consume up to (not including) the
-                            // final byte, matching the scalar loop's exit.
-                            self.pos = @intCast(self.source.len - 1);
-                        }
+                        const close = if (body_start < self.source.len)
+                            std.mem.indexOfPos(u8, self.source, body_start, "*/")
+                        else
+                            null;
+                        self.pos = @intCast(if (close) |c| c + 2 else self.source.len);
+                        if (close == null) return comment_start;
                     } else {
-                        return; // single '/' is a token
+                        return null; // single '/' is a token
                     }
                 },
-                else => return,
+                else => return null,
             }
         }
+        return null;
     }
 
     /// SIMD fast path for runs of layout bytes (space/tab/cr/newline).
@@ -507,13 +514,18 @@ pub const Scanner = struct {
     // Keyword lookup: dispatch on length (a jump table) then compare the few
     // candidates of that length. Non-keyword identifiers — the common case —
     // fall straight through, and long identifiers match no length bucket at all.
+    //
+    // `true`, `false` and `null` are deliberately absent: Nix has no such
+    // keywords, only base-environment variables, so a binder shadows them
+    // (`let true = 1; in true`) and they are legal wherever an identifier is
+    // (`true: true`, `{ null ? 3 }: null`). The compiler folds the unshadowed
+    // ones back to `push_true`/`push_false`/`push_null`.
     fn keywordType(s: []const u8) TokenType {
         const eql = std.mem.eql;
         return switch (s.len) {
             2 => if (eql(u8, s, "if")) .kw_if else if (eql(u8, s, "in")) .kw_in else if (eql(u8, s, "or")) .kw_or else .identifier,
             3 => if (eql(u8, s, "let")) .kw_let else if (eql(u8, s, "rec")) .kw_rec else .identifier,
-            4 => if (eql(u8, s, "then")) .kw_then else if (eql(u8, s, "else")) .kw_else else if (eql(u8, s, "with")) .kw_with else if (eql(u8, s, "true")) .kw_true else if (eql(u8, s, "null")) .kw_null else .identifier,
-            5 => if (eql(u8, s, "false")) .kw_false else .identifier,
+            4 => if (eql(u8, s, "then")) .kw_then else if (eql(u8, s, "else")) .kw_else else if (eql(u8, s, "with")) .kw_with else .identifier,
             6 => if (eql(u8, s, "assert")) .kw_assert else .identifier,
             7 => if (eql(u8, s, "inherit")) .kw_inherit else .identifier,
             else => .identifier,
@@ -524,15 +536,40 @@ pub const Scanner = struct {
 test "scanner recognizes boolean operator tokens" {
     var scanner = Scanner.init("true && false || true ++ []");
 
-    try std.testing.expectEqual(TokenType.kw_true, scanner.next().type);
+    try std.testing.expectEqual(TokenType.identifier, scanner.next().type);
     try std.testing.expectEqual(TokenType.amp_amp, scanner.next().type);
-    try std.testing.expectEqual(TokenType.kw_false, scanner.next().type);
+    try std.testing.expectEqual(TokenType.identifier, scanner.next().type);
     try std.testing.expectEqual(TokenType.pipe_pipe, scanner.next().type);
-    try std.testing.expectEqual(TokenType.kw_true, scanner.next().type);
+    try std.testing.expectEqual(TokenType.identifier, scanner.next().type);
     try std.testing.expectEqual(TokenType.double_plus, scanner.next().type);
     try std.testing.expectEqual(TokenType.left_bracket, scanner.next().type);
     try std.testing.expectEqual(TokenType.right_bracket, scanner.next().type);
     try std.testing.expectEqual(TokenType.eof, scanner.next().type);
+}
+
+// Nix has no `true`/`false`/`null` keywords — they are base-environment
+// variables — so the scanner must hand them over as plain identifiers. A
+// keyword token here made them unshadowable (`let true = 1; in true`) and
+// illegal in binder positions (`true: true`).
+test "scanner lexes true, false and null as identifiers" {
+    var scanner = Scanner.init("let true = 1; in true");
+
+    try std.testing.expectEqual(TokenType.kw_let, scanner.next().type);
+    const bound = scanner.next();
+    try std.testing.expectEqual(TokenType.identifier, bound.type);
+    try std.testing.expectEqualStrings("true", scanner.source[bound.offset..][0..bound.len]);
+    try std.testing.expectEqual(TokenType.equal, scanner.next().type);
+    try std.testing.expectEqual(TokenType.integer, scanner.next().type);
+    try std.testing.expectEqual(TokenType.semicolon, scanner.next().type);
+    try std.testing.expectEqual(TokenType.kw_in, scanner.next().type);
+    try std.testing.expectEqual(TokenType.identifier, scanner.next().type);
+    try std.testing.expectEqual(TokenType.eof, scanner.next().type);
+
+    // Binder positions the keyword tokens could never reach.
+    var lambda = Scanner.init("null: false");
+    try std.testing.expectEqual(TokenType.identifier, lambda.next().type);
+    try std.testing.expectEqual(TokenType.colon, lambda.next().type);
+    try std.testing.expectEqual(TokenType.identifier, lambda.next().type);
 }
 
 test "scanner recognizes pipe operator tokens" {
@@ -650,6 +687,26 @@ test "scanner: ellipsis is not a path unless a slash segment follows" {
     try std.testing.expectEqual(TokenType.eof, p.next().type);
 }
 
+// A digit-leading first component is a normal PATH_CHAR run (`pathWith.nix`
+// in nixpkgs' module tests uses `/123abc`); only whitespace or a non-segment
+// char after the `/` keeps it division.
+test "scanner recognizes digit-leading absolute paths" {
+    var scanner = Scanner.init("/123abc /1/2");
+
+    const t1 = scanner.next();
+    try std.testing.expectEqual(TokenType.path, t1.type);
+    try std.testing.expectEqualStrings("/123abc", scanner.source[t1.offset..][0..t1.len]);
+    const t2 = scanner.next();
+    try std.testing.expectEqual(TokenType.path, t2.type);
+    try std.testing.expectEqualStrings("/1/2", scanner.source[t2.offset..][0..t2.len]);
+    try std.testing.expectEqual(TokenType.eof, scanner.next().type);
+
+    var div = Scanner.init("6 / 2");
+    try std.testing.expectEqual(TokenType.integer, div.next().type);
+    try std.testing.expectEqual(TokenType.slash, div.next().type);
+    try std.testing.expectEqual(TokenType.integer, div.next().type);
+}
+
 test "scanner recognizes interpolated path literals" {
     var scanner = Scanner.init("./${name}/patch ../${dir}/file");
 
@@ -681,6 +738,39 @@ test "scanner recognizes dynamic attribute syntax" {
     try std.testing.expectEqual(TokenType.identifier, scanner.next().type);
     try std.testing.expectEqual(TokenType.right_brace, scanner.next().type);
     try std.testing.expectEqual(TokenType.eof, scanner.next().type);
+}
+
+// A truncated file must not lex as a shorter valid one: before this, the
+// unterminated branch left the final byte to be re-lexed, so `[ 1 2 /*x]`
+// evaluated to `[ 1 2 ]` instead of erroring.
+test "scanner: unterminated block comment is an invalid token" {
+    var trunc = Scanner.init("[ 1 2 /*x]");
+    try std.testing.expectEqual(TokenType.left_bracket, trunc.next().type);
+    try std.testing.expectEqual(TokenType.integer, trunc.next().type);
+    try std.testing.expectEqual(TokenType.integer, trunc.next().type);
+    const bad = trunc.next();
+    try std.testing.expectEqual(TokenType.error_token, bad.type);
+    try std.testing.expectEqualStrings("/*x]", trunc.source[bad.offset..][0..bad.len]);
+    try std.testing.expectEqual(TokenType.eof, trunc.next().type);
+
+    // `/*` with nothing after it at all.
+    var bare = Scanner.init("1 /*");
+    try std.testing.expectEqual(TokenType.integer, bare.next().type);
+    try std.testing.expectEqual(TokenType.error_token, bare.next().type);
+    try std.testing.expectEqual(TokenType.eof, bare.next().type);
+}
+
+test "scanner: terminated block comments are layout" {
+    // `/* */` does not nest in Nix: the first `*/` closes, so the trailing
+    // `*/` of `/* /* */` is layout-free source again.
+    var nested = Scanner.init("1 /* /* */ 2");
+    try std.testing.expectEqual(TokenType.integer, nested.next().type);
+    try std.testing.expectEqual(TokenType.integer, nested.next().type);
+    try std.testing.expectEqual(TokenType.eof, nested.next().type);
+
+    var at_eof = Scanner.init("1 /**/");
+    try std.testing.expectEqual(TokenType.integer, at_eof.next().type);
+    try std.testing.expectEqual(TokenType.eof, at_eof.next().type);
 }
 
 test "scanner recognizes search path literals" {
