@@ -32,6 +32,7 @@ test {
     _ = @import("realize.zig");
     _ = @import("render.zig");
     _ = @import("setup.zig");
+    _ = @import("source_render.zig");
     _ = @import("stats.zig");
     _ = @import("trace_setup.zig");
 }
