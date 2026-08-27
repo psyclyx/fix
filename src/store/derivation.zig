@@ -71,4 +71,5 @@ pub const isSyntheticName = value_builder.isSyntheticName;
 
 test {
     _ = hash_codec;
+    _ = store_name;
 }

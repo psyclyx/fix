@@ -62,9 +62,11 @@ pub fn read(
 
 fn removeLastCodepoint(text: *std.ArrayListUnmanaged(u8)) void {
     if (text.items.len == 0) return;
-    text.items.len -= 1;
-    while (text.items.len > 0 and text.items[text.items.len - 1] & 0xc0 == 0x80)
-        text.items.len -= 1;
+    // Walk back off the continuation bytes onto the lead byte, so a multi-byte
+    // codepoint leaves no orphaned lead behind.
+    var len = text.items.len - 1;
+    while (len > 0 and text.items[len] & 0xc0 == 0x80) len -= 1;
+    text.items.len = len;
 }
 
 test "backspace removes one UTF-8 codepoint" {

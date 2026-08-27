@@ -1053,3 +1053,21 @@ test "parseChunkId accepts explorer display forms" {
     try testing.expectEqual(@as(?types.ChunkId, 42), parseChunkId("chunk[0x2a]"));
     try testing.expect(parseChunkId("nope") == null);
 }
+
+// The repl subtree's test aggregator: this file is the subtree's entry point,
+// so the CLI root reaches every repl file through it.
+test {
+    _ = @import("check.zig");
+    _ = @import("commands.zig");
+    _ = @import("complete.zig");
+    _ = @import("editor.zig");
+    _ = @import("history.zig");
+    _ = @import("keys.zig");
+    _ = @import("line_input.zig");
+    _ = @import("render.zig");
+    _ = @import("scope.zig");
+    _ = @import("term.zig");
+    _ = @import("transcript.zig");
+    _ = @import("width.zig");
+    _ = @import("vm/root.zig");
+}

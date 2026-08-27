@@ -151,7 +151,7 @@ test "source focus outside a token does not duplicate its text" {
     defer output.deinit();
     try writeLine(&output.writer, "if true", .{
         .color_depth = .none,
-        .focus = .{ .start = 3, .end = 7 },
+        .focus = .{ .start = 1, .end = 5 },
     });
     const plain = @import("base").terminal_text.stripAnsiInPlace(output.written());
     try std.testing.expectEqualStrings("if true", plain);

@@ -28,9 +28,13 @@ pub fn isComplete(allocator: std.mem.Allocator, source: []const u8) bool {
                 if (tt == .eof) return false;
             }
             if (diag.offset >= source.len) return false;
-            // Unterminated string/indented-string: the scanner reports the
-            // error at the opening quote, but the input clearly continues.
-            if (std.mem.indexOf(u8, diag.message, "unterminated") != null) return false;
+            // An unterminated string, indented string, or block comment is one
+            // error token anchored at its opener and running to the end of
+            // input; more input can still close it. Keyed on the span rather
+            // than the diagnostic wording, which is not a contract.
+            if (diag.token_type) |tt| {
+                if (tt == .error_token and diag.offset + diag.len >= source.len) return false;
+            }
             return true;
         }
         return true;

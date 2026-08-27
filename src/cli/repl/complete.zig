@@ -275,7 +275,7 @@ test "identPathStart finds the trailing token" {
 
 test "stringOrPathStart detects strings and path literals" {
     try testing.expectEqual(@as(?usize, 1), stringOrPathStart("\"./fo"));
-    try testing.expectEqual(@as(?usize, 8), stringOrPathStart("import ./src/ma"));
+    try testing.expectEqual(@as(?usize, 7), stringOrPathStart("import ./src/ma"));
     try testing.expectEqual(@as(?usize, null), stringOrPathStart("1 + foo"));
     try testing.expectEqual(@as(?usize, null), stringOrPathStart("\"hello wo"));
     // A closed string puts us back outside.
