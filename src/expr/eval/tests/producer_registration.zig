@@ -376,6 +376,65 @@ test "realizeOutput realizes a mixed producer closure before the root derivation
     } else return error.MissingRecipeInspectionApi;
 }
 
+test "read-write evaluation writes sources and toFile objects with no derivation to demand them" {
+    if (comptime recipeInspectionAvailable()) {
+        var fixture = try Fixture.init(std.testing.allocator, false);
+        defer fixture.deinit();
+        // `nix-instantiate --eval --read-write-mode`: the CLI prints the value
+        // and exits, so a coerced source has no terminal closure that would
+        // ever walk its recipe. Each producer must land in the store itself.
+        fixture.ev.enableReadWriteEvaluation();
+        try fixture.tmp.dir.createDir(std.testing.io, "rw-src", .default_dir);
+        try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "rw-src/file.txt", .data = "rw nar payload" });
+        try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "rw-flat.txt", .data = "rw flat payload" });
+        try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "rw-coerce.txt", .data = "rw coerce payload" });
+
+        const cwd = try std.process.currentPathAlloc(std.testing.io, fixture.allocator);
+        defer fixture.allocator.free(cwd);
+        const src_path = try std.fs.path.resolve(fixture.allocator, &.{ cwd, ".zig-cache", "tmp", &fixture.tmp.sub_path, "rw-src" });
+        defer fixture.allocator.free(src_path);
+        const flat_path = try std.fs.path.resolve(fixture.allocator, &.{ cwd, ".zig-cache", "tmp", &fixture.tmp.sub_path, "rw-flat.txt" });
+        defer fixture.allocator.free(flat_path);
+        const coerce_path = try std.fs.path.resolve(fixture.allocator, &.{ cwd, ".zig-cache", "tmp", &fixture.tmp.sub_path, "rw-coerce.txt" });
+        defer fixture.allocator.free(coerce_path);
+        const source = try std.fmt.allocPrint(
+            fixture.allocator,
+            \\{{
+            \\  text = builtins.toFile "rw-text" "rw text payload";
+            \\  src = builtins.path {{ path = "{s}"; name = "rw-src"; }};
+            \\  flat = builtins.path {{ path = "{s}"; name = "rw-flat"; recursive = false; }};
+            \\  coerced = "${{{s}}}";
+            \\}}
+        ,
+            .{ src_path, flat_path, coerce_path },
+        );
+        defer fixture.allocator.free(source);
+
+        const attrs_id = try fixture.evaluateAttrs(source);
+        const nar_bytes = try nar.serialize(fixture.allocator, &fixture.ev.sources.files, src_path, null);
+        defer fixture.allocator.free(nar_bytes);
+        const coerce_nar = try nar.serialize(fixture.allocator, &fixture.ev.sources.files, coerce_path, null);
+        defer fixture.allocator.free(coerce_nar);
+
+        // Each attr writes exactly once, at the point it is produced, and leaves
+        // no recipe behind for a closure walk that will never come.
+        const text_path = try fixture.forceAttrText(attrs_id, "text");
+        try std.testing.expectEqual(@as(usize, 1), fixture.fake.effectCount());
+        try expectEffect(fixture.fake, 0, .text, storePathSubject(text_path), "rw text payload", &.{});
+        const src_store_path = try fixture.forceAttrText(attrs_id, "src");
+        try std.testing.expectEqual(@as(usize, 2), fixture.fake.effectCount());
+        try expectEffect(fixture.fake, 1, .nar, storePathSubject(src_store_path), nar_bytes, &.{});
+        const flat_store_path = try fixture.forceAttrText(attrs_id, "flat");
+        try std.testing.expectEqual(@as(usize, 3), fixture.fake.effectCount());
+        try expectEffect(fixture.fake, 2, .flat, storePathSubject(flat_store_path), "rw flat payload", &.{});
+        const coerced_path = try fixture.forceAttrText(attrs_id, "coerced");
+        try std.testing.expectEqual(@as(usize, 4), fixture.fake.effectCount());
+        try expectEffect(fixture.fake, 3, .nar, storePathSubject(coerced_path), coerce_nar, &.{});
+
+        try std.testing.expectEqual(@as(usize, 0), fixture.ev.store.realization.testAccess().recipeCount());
+    } else return error.MissingRecipeInspectionApi;
+}
+
 test "store-writing mode defers writes; ensureClosure materializes the drv closure deps-first" {
     if (comptime recipeInspectionAvailable()) {
         var fixture = try Fixture.init(std.testing.allocator, true);
