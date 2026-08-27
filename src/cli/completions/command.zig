@@ -649,3 +649,8 @@ test "completion context tracks required and multi-value options" {
     const package_scan = scanContext(&package_words, 3, .shell);
     try std.testing.expectEqual(args.CompletionHint.package, package_scan.expected.?.hint);
 }
+
+test {
+    _ = context;
+    _ = providers;
+}

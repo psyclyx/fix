@@ -19,6 +19,7 @@ test {
     _ = command_meta;
     _ = @import("args.zig");
     _ = @import("build_progress.zig");
+    _ = @import("completions/command.zig");
     _ = @import("debugger.zig");
     _ = @import("debugger_command.zig");
     _ = @import("eval_support.zig");
@@ -31,8 +32,10 @@ test {
     _ = @import("progress.zig");
     _ = @import("realize.zig");
     _ = @import("render.zig");
+    _ = @import("repl/command.zig");
     _ = @import("setup.zig");
     _ = @import("source_render.zig");
     _ = @import("stats.zig");
+    _ = @import("thunks/diff.zig");
     _ = @import("trace_setup.zig");
 }

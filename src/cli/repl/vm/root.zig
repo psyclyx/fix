@@ -90,6 +90,29 @@ test "tree row identities ignore transient display ids" {
     try std.testing.expect(vm_helpers.treeRowsEqual(old_range, rebuilt_range));
 }
 
+test {
+    _ = @import("controller.zig");
+    _ = @import("debug_view.zig");
+    _ = @import("jobs.zig");
+    _ = @import("model.zig");
+    _ = @import("navigation.zig");
+    _ = @import("operations.zig");
+    _ = @import("pages.zig");
+    _ = @import("plain.zig");
+    _ = @import("preview.zig");
+    _ = @import("prompt.zig");
+    _ = @import("query_cache.zig");
+    _ = @import("refs.zig");
+    _ = @import("semantics.zig");
+    _ = @import("source.zig");
+    _ = @import("source_view.zig");
+    _ = @import("tree.zig");
+    _ = @import("tree_projection.zig");
+    _ = @import("tree_render.zig");
+    _ = @import("tui.zig");
+    _ = @import("value_summary.zig");
+}
+
 test "source snippets honor their container width" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -1070,7 +1070,6 @@ test "tab completion extends, lists, and cycles in both directions" {
 
     // Second tab with no further progress → menu.
     _ = try rig.key(.{ .code = .tab });
-    _ = try rig.key(.{ .code = .tab });
     try testing.expectEqual(@as(usize, 3), e.menuLines().len);
 
     // Further tabs replace the span and wrap through the candidates.
