@@ -30,11 +30,15 @@ test "tryEval catches thrown errors but not arbitrary Zig errors" {
     defer std_testing.allocator.free(caught_throw);
     try std_testing.expectEqualStrings("false", caught_throw);
 
-    const caught_abort = try renderForTest("(builtins.tryEval (builtins.abort \"boom\")).success");
-    defer std_testing.allocator.free(caught_abort);
-    try std_testing.expectEqualStrings("false", caught_abort);
+    const caught_assert = try renderForTest("(builtins.tryEval (assert false; 1)).success");
+    defer std_testing.allocator.free(caught_assert);
+    try std_testing.expectEqualStrings("false", caught_assert);
 
-    // Division by zero is not one of tryEval's caught kinds — it propagates.
+    // Nix catches only ThrownError and AssertionError. `abort` is uncatchable
+    // by design and division by zero is not a caught kind either. An I/O
+    // failure also propagates; its exact error depends on whether the host has
+    // file IO, so the readFile case is pinned by the language suite instead.
+    try std_testing.expectError(error.NixAbort, renderForTest("builtins.tryEval (builtins.abort \"boom\")"));
     try std_testing.expectError(error.DivisionByZero, renderForTest("builtins.tryEval (1 / 0)"));
 }
 

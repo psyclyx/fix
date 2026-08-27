@@ -34,7 +34,15 @@ pub fn builtinThrow(self: *VM, message_arg: Value) !Value {
 }
 
 pub fn builtinAbort(self: *VM, message_arg: Value) !Value {
-    try vm_trace.setErrorMessage(self, try strings.stringArg(self, message_arg));
+    // Framed as Nix frames it, so an abort reads differently from a throw:
+    // the two are no longer interchangeable now that tryEval catches only one.
+    const message = try std.fmt.allocPrint(
+        self.allocator,
+        "evaluation aborted with the following error message: '{s}'",
+        .{try strings.stringArg(self, message_arg)},
+    );
+    defer self.allocator.free(message);
+    try vm_trace.setErrorMessage(self, message);
     try debugBreakError(self, message_arg);
     return error.NixAbort;
 }
@@ -44,11 +52,12 @@ pub fn builtinTryEval(self: *VM, arg: Value) !Value {
     const ctx = self.executionContext();
     ctx.tryeval_depth += 1;
     defer ctx.tryeval_depth -= 1;
+    // Nix catches exactly ThrownError and AssertionError here. `abort` is
+    // uncatchable by design -- it means "this evaluation must not continue" --
+    // and an I/O failure is not a language-level exception, so both propagate.
     const value = vm_force.forceValue(self, arg) catch |err| switch (err) {
         error.NixThrow,
-        error.NixAbort,
         error.AssertionFailed,
-        error.FileNotFound,
         => {
             ctx.clearFailure();
             vm_trace.clearErrorTrace(self);
