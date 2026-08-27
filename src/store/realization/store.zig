@@ -288,6 +288,18 @@ pub const RealizationStore = struct {
         return self.eager_evaluation_writes;
     }
 
+    /// Materialize a just-recorded recipe when legacy read-write evaluation is
+    /// on. Sources and `toFile` objects have no terminal closure to pull them
+    /// in — the CLI prints the evaluated value and exits — so unlike a `.drv`
+    /// under `instantiate`/`build` nothing would ever walk their recipe. A
+    /// no-op in every other mode, which keeps plain eval off the store.
+    /// Callers must not hold a source-ingest stripe lock: this parks the fiber
+    /// on daemon round-trips.
+    pub fn materializeEagerRecipe(self: *RealizationStore, store_path: []const u8) !void {
+        if (!self.eager_evaluation_writes) return;
+        return self.ensureClosure(store_path);
+    }
+
     pub fn setObserver(self: *RealizationStore, observer: observ.Observer) void {
         self.observer = observer;
     }

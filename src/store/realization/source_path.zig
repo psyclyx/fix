@@ -103,6 +103,25 @@ pub fn ingestReport(
     filter_key: ?FilterKey,
     unsupported: ?*nar.Unsupported,
 ) !Ingested {
+    const ingested = try recordIngest(allocator, realization, files, path, name, filter, filter_key, unsupported);
+    errdefer ingested.deinit(allocator);
+    // Outside `recordIngest` so the ingest stripe lock is already released:
+    // materializing parks the fiber on the daemon. A memo hit lands here too,
+    // where the store's presence cache makes it a cheap re-check.
+    try realization.materializeEagerRecipe(ingested.store_path);
+    return ingested;
+}
+
+fn recordIngest(
+    allocator: std.mem.Allocator,
+    realization: *RealizationStore,
+    files: *FileCache,
+    path: []const u8,
+    name: []const u8,
+    filter: ?nar.Filter,
+    filter_key: ?FilterKey,
+    unsupported: ?*nar.Unsupported,
+) !Ingested {
     // In-eval source memo (Nix's `srcToStore`): an ingest of the same (path,
     // name[, filter]) is fully determined by content, which `FileCache` freezes
     // for the eval — so reuse the first coercion's store path + NAR hash instead
@@ -254,6 +273,7 @@ pub fn flatStorePathForFile(
     const store_path = try drv_paths.fixedOutputPath(allocator, realization.store_dir, name, "out", "sha256", hex[0..]);
     errdefer allocator.free(store_path);
     try realization.recordFlatRecipe(store_path, contents, true);
+    try realization.materializeEagerRecipe(store_path);
 
     return .{ .store_path = store_path, .hash_hex = hex };
 }

@@ -99,6 +99,55 @@ else
 fi
 t "daemon: read fresh text object" "text-via-daemon" "$out"
 
+# `--read-write-mode` must REGISTER what it names, not just name it. Nothing
+# demands a bare coercion's closure -- the CLI prints the value and exits -- so
+# these regressed to computing the path and dropping the recipe on the floor.
+# Fresh bytes per run keep the "not registered yet" half honest.
+rw_dir=$(e2e_mktemp)
+rw_stamp="rw-$$-$(date +%s%N)"
+mkdir -p "$rw_dir/tree" "$rw_dir/filtered"
+printf 'registered-%s' "$rw_stamp" >"$rw_dir/tree/inner.txt"
+# Its own bytes: an accept-all filterSource of $rw_dir/tree would land on the
+# store path the toJSON case just registered, silently voiding that check.
+printf 'filtered-%s' "$rw_stamp" >"$rw_dir/filtered/inner.txt"
+printf 'coerced-%s' "$rw_stamp" >"$rw_dir/coerce.txt"
+printf 'flat-%s' "$rw_stamp" >"$rw_dir/flat.txt"
+
+# --raw of a toJSON result is a JSON string; strip the quotes so every case
+# yields a bare store path.
+rw_path() { # rw_path <expr> <extra fix args...>
+    local expr="$1" out
+    shift
+    out=$("$FIX" eval --raw "$@" -E "$expr" 2>/dev/null)
+    printf '%s' "${out%\"}" | sed -e 's/^"//'
+}
+# Registration, not mere presence: a `.check`-style verify proves the path is in
+# the daemon's database. Fall back to existence where nix-store is absent.
+rw_verify() { # rw_verify <store path>
+    if command -v nix-store >/dev/null 2>&1; then
+        nix-store --verify-path "$1" >/dev/null 2>&1
+    else
+        test -e "$1"
+    fi
+}
+rw_registered() { # rw_registered <name> <expr>
+    local name="$1" expr="$2" quiet path
+    quiet=$(rw_path "$expr")
+    ok_if "$name: plain eval leaves it unregistered" test ! -e "$quiet"
+    path=$(rw_path "$expr" --read-write-mode)
+    t "$name: same store path under --read-write-mode" "$quiet" "$path"
+    ok_if "$name: --read-write-mode registers it" rw_verify "$path"
+}
+
+rw_registered "daemon: interpolated path" "\"\${$rw_dir/coerce.txt}\""
+rw_registered "daemon: toJSON path" "builtins.toJSON $rw_dir/tree"
+rw_registered "daemon: builtins.path" \
+    "builtins.path { path = $rw_dir/tree; name = \"fix-daemon-e2e-rw-$rw_stamp\"; }"
+rw_registered "daemon: flat builtins.path" \
+    "builtins.path { path = $rw_dir/flat.txt; recursive = false; }"
+rw_registered "daemon: filterSource" "builtins.filterSource (p: t: true) $rw_dir/filtered"
+rw_registered "daemon: toFile" "builtins.toFile \"fix-daemon-e2e-tofile\" \"body-$rw_stamp\""
+
 # The subpath analogue: reading `src + "/inner.txt"` out of a fresh ingested
 # tree materializes the tree's store root.
 subread_dir=$(e2e_mktemp)

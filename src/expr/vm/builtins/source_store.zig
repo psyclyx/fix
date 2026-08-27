@@ -87,6 +87,7 @@ pub fn builtinToFile(self: *VM, name_arg: Value, contents_arg: Value) !Value {
     defer self.allocator.free(path);
     // recordOwnedTextRecipe consumes contents on success and error.
     try self.realization.recordOwnedTextRecipe(path, contents, refs);
+    try self.realization.materializeEagerRecipe(path);
     return contextStringWithPath(self, try self.intern.intern(path));
 }
 
