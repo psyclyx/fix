@@ -264,7 +264,7 @@ fn readGolden(ctx: Ctx, c: Case, arena: std.mem.Allocator, which: []const u8) !?
 
 // --- flag translation -------------------------------------------------------
 
-const supported_flags = [_][]const u8{ "-A", "--attr", "--arg", "--argstr", "--option", "-I", "--include", "--xml", "--json", "--strict", "--no-location", "--expr", "-E", "--file", "--show-trace" };
+const supported_flags = [_][]const u8{ "-A", "--attr", "--arg", "--argstr", "--option", "-I", "--include", "--xml", "--json", "--strict", "--no-location", "--expr", "-E", "--file", "--show-trace", "--no-show-trace" };
 const fix_experimental = [_][]const u8{ "pipe-operators", "fetch-tree", "flakes", "coerce-integers" };
 
 /// Returns null on success (filling `out`), or an error reason string.

@@ -76,6 +76,7 @@ pub fn apply(
         .keep_going => try options.option_overrides.append(allocator, .{ .name = "keep-going", .value = "true" }),
         .verbose => options.verbose +|= 1,
         .show_trace => options.show_trace = true,
+        .no_show_trace => options.show_trace = false,
         .debugger => options.debugger = true,
         .color => options.color = if (v0) |value| (presentation.parseWhen(value) orelse return error.InvalidColorMode) else .always,
         .no_color => options.color = .never,

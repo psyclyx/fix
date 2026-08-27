@@ -357,6 +357,7 @@ pub const Opt = enum {
     verbose,
     // Diagnostics.
     show_trace,
+    no_show_trace,
     debugger,
     color,
     no_color,
@@ -525,6 +526,7 @@ const specs = [_]Spec{
 
     .{ .id = .stats, .long = "--stats", .help = "print evaluator or bytecode corpus statistics", .show_in = stats_cmds },
     .{ .id = .show_trace, .long = "--show-trace", .help = "show full evaluation traces on error", .show_in = eval_cmds },
+    .{ .id = .no_show_trace, .long = "--no-show-trace", .help = "truncate long evaluation traces on error (default)", .show_in = eval_cmds },
     .{ .id = .debugger, .long = "--debugger", .help = "pause into an interactive debugger at builtins.break\n(forces --workers=1)", .show_in = &[_]Cmd{ .eval, .repl } },
     .{ .id = .color, .long = "--color", .arg = .opt, .metavar = "WHEN", .help = "color diagnostics: auto, always, never", .default_value = "auto", .complete = .{ .color, .none } },
     .{ .id = .no_color, .long = "--no-color", .help = "disable color diagnostics" },
