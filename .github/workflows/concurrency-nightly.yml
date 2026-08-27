@@ -33,23 +33,9 @@ jobs:
       STRESS_SEED: ${{ github.run_id }}
     steps:
       - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v31
-      - id: store
-        uses: ./.github/actions/nix-store-cache
+      - uses: ./.github/actions/setup-nix
         with:
           key: nix-v4-stress-${{ matrix.system }}-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
-      - name: Reinstall nix (cold, after wipe)
-        if: steps.store.outputs.wiped == 'true'
-        uses: cachix/install-nix-action@v31
-      - name: Re-disable store optimisation (cold path)
-        if: steps.store.outputs.wiped == 'true'
-        run: |
-          echo "auto-optimise-store = false" | sudo tee -a /etc/nix/nix.conf
-          sudo systemctl restart nix-daemon 2>/dev/null || true
-      - name: Install pinned nixpkgs channel
-        run: |
-          nix-channel --add "$(jq -r '.pins.nixpkgs.url' npins/sources.json)" nixpkgs
-          nix-channel --update nixpkgs
       # Warm from the on-push test caches when the nightly one is stale.
       - name: Restore zig cache
         uses: actions/cache@v5
@@ -139,23 +125,9 @@ jobs:
         workers: [8, 16]
     steps:
       - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v31
-      - id: store
-        uses: ./.github/actions/nix-store-cache
+      - uses: ./.github/actions/setup-nix
         with:
           key: nix-v4-stress-x86_64-linux-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
-      - name: Reinstall nix (cold, after wipe)
-        if: steps.store.outputs.wiped == 'true'
-        uses: cachix/install-nix-action@v31
-      - name: Re-disable store optimisation (cold path)
-        if: steps.store.outputs.wiped == 'true'
-        run: |
-          echo "auto-optimise-store = false" | sudo tee -a /etc/nix/nix.conf
-          sudo systemctl restart nix-daemon 2>/dev/null || true
-      - name: Install pinned nixpkgs channel
-        run: |
-          nix-channel --add "$(jq -r '.pins.nixpkgs.url' npins/sources.json)" nixpkgs
-          nix-channel --update nixpkgs
       # One shared key: all eight jobs compile the same TSan binary; the
       # first to finish saves, the rest hit.
       - name: Restore zig cache
@@ -188,23 +160,9 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v31
-      - id: store
-        uses: ./.github/actions/nix-store-cache
+      - uses: ./.github/actions/setup-nix
         with:
           key: nix-v4-build-${{ matrix.system }}-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
-      - name: Reinstall nix (cold, after wipe)
-        if: steps.store.outputs.wiped == 'true'
-        uses: cachix/install-nix-action@v31
-      - name: Re-disable store optimisation (cold path)
-        if: steps.store.outputs.wiped == 'true'
-        run: |
-          echo "auto-optimise-store = false" | sudo tee -a /etc/nix/nix.conf
-          sudo systemctl restart nix-daemon 2>/dev/null || true
-      - name: Install pinned nixpkgs channel
-        run: |
-          nix-channel --add "$(jq -r '.pins.nixpkgs.url' npins/sources.json)" nixpkgs
-          nix-channel --update nixpkgs
       - name: Restore zig cache
         uses: actions/cache@v5
         with:
@@ -253,24 +211,10 @@ jobs:
           - {system: aarch64-linux, runner: ubuntu-24.04-arm, chunk: 0, strings: '0'}
     steps:
       - uses: actions/checkout@v6
-      - uses: cachix/install-nix-action@v31
       # Restore-only: the on-push pipeline owns these snapshot keys.
-      - id: store
-        uses: ./.github/actions/nix-store-cache
+      - uses: ./.github/actions/setup-nix
         with:
           key: nix-v4-eval-${{ matrix.system }}-${{ hashFiles('**/*.nix', 'npins/sources.json') }}
-      - name: Reinstall nix (cold, after wipe)
-        if: steps.store.outputs.wiped == 'true'
-        uses: cachix/install-nix-action@v31
-      - name: Re-disable store optimisation (cold path)
-        if: steps.store.outputs.wiped == 'true'
-        run: |
-          echo "auto-optimise-store = false" | sudo tee -a /etc/nix/nix.conf
-          sudo systemctl restart nix-daemon 2>/dev/null || true
-      - name: Install pinned nixpkgs channel
-        run: |
-          nix-channel --add "$(jq -r '.pins.nixpkgs.url' npins/sources.json)" nixpkgs
-          nix-channel --update nixpkgs
       - name: Restore oracle cache
         uses: actions/cache@v5
         with:
