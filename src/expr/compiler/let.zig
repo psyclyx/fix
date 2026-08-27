@@ -572,28 +572,14 @@ const RhsMarker = struct {
 /// Compile one root-name group's initializer. `members` is the group's
 /// binding-index list from `BindingGroups` (source order).
 fn compileLetRootBinding(self: *Compiler, bindings: []const Node.Binding, members: []const u32, slot: u16, eager: bool, inherit_source_slot: ?u16) !void {
-    var leaf: ?Node.Binding = null;
+    var leaf_count: usize = 0;
     var tail_count: usize = 0;
-
     for (members) |member| {
-        const binding = bindings[member];
-        if (binding.path.len == 1) {
-            if (leaf) |previous| {
-                const span = self.source[binding.name_offset .. binding.name_offset + binding.name_len];
-                const message = try std.fmt.allocPrint(self.allocator, "variable '{s}' already defined", .{span});
-                try self.owned_diagnostic_messages.append(self.allocator, message);
-                try diagnostics.reportCompileError(self, binding.name_offset, binding.name_len, message);
-                try diagnostics.reportCompileNote(self, previous.name_offset, previous.name_len, "first binding defined here");
-                return error.DuplicateBinding;
-            }
-            leaf = binding;
-        } else {
-            tail_count += 1;
-        }
+        if (bindings[member].path.len == 1) leaf_count += 1 else tail_count += 1;
     }
 
-    if (tail_count == 0) {
-        const binding = leaf orelse return error.UndefinedVariable;
+    if (leaf_count == 1 and tail_count == 0) {
+        const binding = bindings[members[0]];
         if (inherit_source_slot) |source_slot| {
             try emit.emitThunkAttr(self, .{
                 .name = "\x00inherit-source",
@@ -609,37 +595,64 @@ fn compileLetRootBinding(self: *Compiler, bindings: []const Node.Binding, member
         self.skip_local_slot = previous_skip;
         return compile_result;
     }
+    if (leaf_count == 0 and tail_count == 0) return error.UndefinedVariable;
 
-    const tails = try self.allocator.alloc(AttrEntryView, tail_count);
-    defer self.allocator.free(tails);
-    var i: usize = 0;
+    const views = try self.allocator.alloc(AttrEntryView, members.len);
+    defer self.allocator.free(views);
+    const leaves = views[0..leaf_count];
+    const tails = views[leaf_count..];
+    var leaf_i: usize = 0;
+    var tail_i: usize = 0;
     for (members) |member| {
         const binding = bindings[member];
-        if (binding.path.len == 1) continue;
-        tails[i] = .{
-            .path = binding.path[1..],
+        const leafy = binding.path.len == 1;
+        const dst = if (leafy) &leaves[leaf_i] else &tails[tail_i];
+        dst.* = .{
+            .path = if (leafy) binding.path else binding.path[1..],
             .expr = binding.expr,
             .inherit_outer = binding.inherit_outer,
             .inherit_group = binding.inherit_group,
         };
-        i += 1;
+        if (leafy) leaf_i += 1 else tail_i += 1;
     }
 
-    if (leaf) |root_leaf| {
-        if (root_leaf.expr.tag != .attr_set) {
-            try diagnostics.reportDuplicateAttribute(self, tails[0].path[0], root_leaf.path[0]);
-            return error.DuplicateAttribute;
+    if (leaf_count == 0) return attrs.compileAttrEntriesThunk(self, tails, true);
+
+    // Definitions of one root merge only when every one of them is an
+    // attr-set literal — including the wrapper sets the parser synthesizes
+    // for a dynamic tail (`c.${x} = 1` parses as `c = { ${x} = 1; }`), which
+    // is why two dynamic prefixes on the same root merge just like a static
+    // one. Anything else is a genuine redefinition.
+    for (leaves) |lv| {
+        if (lv.expr.tag == .attr_set) continue;
+        if (leaf_count > 1) {
+            // Report at the second definition, as a plain `c = 1; c = 2;`
+            // redefinition does, whichever of the two has the bad shape.
+            const binding = bindings[members[nthLeafMember(bindings, members, 1)]];
+            const previous = bindings[members[nthLeafMember(bindings, members, 0)]];
+            const span = self.source[binding.name_offset .. binding.name_offset + binding.name_len];
+            const message = try std.fmt.allocPrint(self.allocator, "variable '{s}' already defined", .{span});
+            try self.owned_diagnostic_messages.append(self.allocator, message);
+            try diagnostics.reportCompileError(self, binding.name_offset, binding.name_len, message);
+            try diagnostics.reportCompileNote(self, previous.name_offset, previous.name_len, "first binding defined here");
+            return error.DuplicateBinding;
         }
-        const leaves = [_]AttrEntryView{.{
-            .path = root_leaf.path,
-            .expr = root_leaf.expr,
-            .inherit_outer = root_leaf.inherit_outer,
-            .inherit_group = root_leaf.inherit_group,
-        }};
-        return attrs.compileExtendedAttrSetLiteralThunk(self, &leaves, tails);
+        try diagnostics.reportDuplicateAttribute(self, tails[0].path[0], lv.path[0]);
+        return error.DuplicateAttribute;
     }
 
-    return attrs.compileAttrEntriesThunk(self, tails, true);
+    return attrs.compileExtendedAttrSetLiteralThunk(self, leaves, tails);
+}
+
+/// Index into `members` of its `n`-th `path.len == 1` binding.
+fn nthLeafMember(bindings: []const Node.Binding, members: []const u32, n: usize) usize {
+    var seen: usize = 0;
+    for (members, 0..) |member, i| {
+        if (bindings[member].path.len != 1) continue;
+        if (seen == n) return i;
+        seen += 1;
+    }
+    unreachable;
 }
 
 /// Structural builders (attrset/lambda/list) stay lazy: they're already
