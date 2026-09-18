@@ -3,6 +3,7 @@
 //! via mknod; device nodes are handled at run time via a userns bind-mount).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Dir = std.Io.Dir;
 
 pub fn readFile(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
@@ -43,7 +44,7 @@ var temp_counter: std.atomic.Value(u64) = .init(0);
 /// Uniqueness comes from pid + a process-global counter (no RNG needed).
 pub fn makeTempDir(gpa: std.mem.Allocator, io: std.Io) ![]u8 {
     const n = temp_counter.fetchAdd(1, .monotonic);
-    const path = try std.fmt.allocPrint(gpa, "/tmp/fixlang-{d}-{d}", .{ std.c.getpid(), n });
+    const path = try std.fmt.allocPrint(gpa, "/tmp/fixlang-{d}-{d}", .{ std.posix.system.getpid(), n });
     errdefer gpa.free(path);
     try Dir.cwd().createDirPath(io, path);
     var canonical_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -84,13 +85,24 @@ pub fn copyTree(gpa: std.mem.Allocator, io: std.Io, src: []const u8, dst: []cons
 }
 
 // POSIX FIFO creation. Device-node fixtures instead use a run-time bind-mount.
-extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+// The libc `mkfifo` is referenced only inside the non-Linux comptime branch,
+// so the Linux runner links no libc.
+const libc_mkfifo = struct {
+    extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+};
+
+const fifo_mode: u32 = 0o10000 | 0o666; // S_IFIFO | rw-rw-rw-
 
 /// A FIFO inode (unprivileged).
 pub fn mkfifoAt(gpa: std.mem.Allocator, path: []const u8) !void {
     const z = try gpa.dupeZ(u8, path);
     defer gpa.free(z);
-    if (mkfifo(z.ptr, @intCast(std.c.S.IFIFO | @as(u32, 0o666))) != 0) return error.MkfifoFailed;
+    if (comptime builtin.os.tag == .linux) {
+        const rc: isize = @bitCast(std.os.linux.mknod(z.ptr, fifo_mode, 0));
+        if (rc < 0) return error.MkfifoFailed;
+        return;
+    }
+    if (libc_mkfifo.mkfifo(z.ptr, @intCast(fifo_mode)) != 0) return error.MkfifoFailed;
 }
 
 /// Create a real Unix-domain socket inode and close the listener. Unlike

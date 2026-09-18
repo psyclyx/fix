@@ -430,8 +430,9 @@ pub fn build(b: *std.Build) void {
     // suite, not a unit test — the hand-rolled Zig runner (test/lang/*.zig)
     // needs only Nix (to resolve the npins pins), drives `fix` per case, and
     // exits non-zero while any case diverges. Pass runner flags through, e.g.
-    // `zig build test-lang -- --suite lix`. libc is linked for the POSIX
-    // special-file creation (mkfifo/mknod) the snix fixtures need.
+    // `zig build test-lang -- --suite lix`. Linux makes the snix fixtures'
+    // special files with raw syscalls, so it links no libc. Other POSIX hosts
+    // call the libc `mkfifo`.
     const lang_step = b.step("test-lang", "Run the Lix + snix language conformance suites against fix");
     const lang_exe = b.addExecutable(.{
         .name = "lang-runner",
@@ -439,7 +440,6 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("test/lang/main.zig"),
             .target = target,
             .optimize = optimize,
-            .link_libc = true,
         }),
         .use_llvm = true,
     });
@@ -464,7 +464,6 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("test/bench_check.zig"),
             .target = target,
             .optimize = optimize,
-            .link_libc = true,
         }),
         .use_llvm = true,
     });

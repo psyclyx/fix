@@ -17,8 +17,11 @@ pub const checksum_seed: u64 = 0xF17C_CACE_B10B;
 
 pub const Error = error{ Uncacheable, Corrupt, Stale, Unfit, OutOfMemory };
 
-pub fn corruptAt(src: std.builtin.SourceLocation) Error {
-    if (std.c.getenv("FIX_CC_DEBUG") != null)
+/// Reject a blob as corrupt. `debug` comes from `FIX_CC_DEBUG` and prints the
+/// rejection site, which names the check that failed. Decode paths that hold a
+/// `Reader` call `Reader.corrupt` instead of passing the flag by hand.
+pub fn corruptAt(src: std.builtin.SourceLocation, debug: bool) Error {
+    if (debug)
         std.debug.print("cache corrupt at {s}:{d}\n", .{ src.fn_name, src.line });
     return error.Corrupt;
 }
@@ -71,6 +74,8 @@ pub const LoadDeps = struct {
     base_path: ?[]const u8,
     source_path: ?[]const u8,
     policy: LanguagePolicy,
+    /// `FIX_CC_DEBUG`: print the site of every corrupt-blob rejection.
+    debug: bool = false,
 };
 
 pub const LoadResult = struct {
@@ -82,9 +87,16 @@ pub const LoadResult = struct {
 pub const Reader = struct {
     bytes: []const u8,
     pos: usize = 0,
+    /// `FIX_CC_DEBUG`: print the site of every corrupt-blob rejection.
+    debug: bool = false,
+
+    /// Reject the blob and report this site. See `corruptAt`.
+    pub fn corrupt(self: *const Reader, src: std.builtin.SourceLocation) Error {
+        return corruptAt(src, self.debug);
+    }
 
     pub fn need(self: *const Reader, n: usize) Error!void {
-        if (self.pos > self.bytes.len or n > self.bytes.len - self.pos) return corruptAt(@src());
+        if (self.pos > self.bytes.len or n > self.bytes.len - self.pos) return self.corrupt(@src());
     }
 
     pub fn u8_(self: *Reader) Error!u8 {

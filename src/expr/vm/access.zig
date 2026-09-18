@@ -89,7 +89,7 @@ pub fn getAttrValue(self: *VM, attrs_val: Value, name_id: InternId) !Value {
 /// the result if they need a resolved value.
 inline fn cachedAttrLookup(self: *VM, obj_id: types.ObjectId, name_id: InternId) !Value {
     const slot_idx = attrCacheIndex(obj_id, name_id);
-    const slot = &thread_caches.get().attr_cache[slot_idx];
+    const slot = &thread_caches.get(self.allocator).attr_cache[slot_idx];
     const token = self.heap.token;
     if (slot.heap_token == token and slot.obj_id == obj_id and slot.name_id == name_id) {
         if (comptime prof.enabled) {

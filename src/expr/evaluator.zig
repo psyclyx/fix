@@ -724,6 +724,13 @@ pub const Engine = struct {
         return if (self.tuning_policy) |policy| policy.let_float_report else false;
     }
 
+    /// Whether `FIX_CC_DEBUG` asked the chunk-cache decoder to report the
+    /// source location of a corrupt-blob rejection. Reads the resolved policy
+    /// without forcing resolution, the same as the census switch above.
+    pub fn chunkCacheDebugEnabled(self: *const Engine) bool {
+        return if (self.tuning_policy) |policy| policy.cc_debug else false;
+    }
+
     /// Engine-owned let-rewrite statistics for tooling reports.
     pub fn letFloatStats(self: *const Engine) *const compiler_mod.let_float.Stats {
         return &self.compilation.let_float_stats;
@@ -1724,6 +1731,7 @@ pub const Engine = struct {
                 .base_path = base_path,
                 .source_path = source_path,
                 .policy = self.policy,
+                .debug = self.chunkCacheDebugEnabled(),
             }) catch |err| {
                 arena.deinit();
                 _ = self.compilation.cache_rejects.fetchAdd(1, .monotonic);
@@ -2409,6 +2417,7 @@ pub const Engine = struct {
             .trace_verbose = self.trace_verbose,
             .lazy_shells_visible = self.lazy_shells_visible,
             .heap_string_min = self.ensureTuningPolicy().heap_string_min,
+            .dup_census = self.ensureTuningPolicy().dup_census,
         });
         // A nested VM runs on the surrounding fiber, so it borrows that
         // fiber's execution identity wholesale: claim id (any thunk it

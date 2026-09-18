@@ -341,6 +341,9 @@ pub const VM = struct {
     heap_string_min: usize,
     /// Nix's `trace-verbose` setting gates `builtins.traceVerbose`.
     trace_verbose: bool,
+    /// `FIX_PROF_DUP` in a `-Dprof-main` build: run the duplicate-thunk
+    /// census. Always false in builds without the profiler.
+    dup_census: bool,
 
     /// Values held off the VM stack across GC safepoints.
     gc_roots: GcRoots = .{},
@@ -373,6 +376,7 @@ pub const VM = struct {
         heap_string_min: usize = 64,
         trace_verbose: bool = false,
         lazy_shells_visible: bool = false,
+        dup_census: bool = false,
     };
 
     pub fn init(options: Init) !VM {
@@ -425,6 +429,7 @@ pub const VM = struct {
             .policy = options.policy,
             .heap_string_min = options.heap_string_min,
             .trace_verbose = options.trace_verbose,
+            .dup_census = options.dup_census,
         };
     }
 

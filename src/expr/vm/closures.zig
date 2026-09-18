@@ -384,7 +384,7 @@ inline fn closureChunkViaIC(self: *VM, callee_chunk_id: ChunkId) !*const Chunk {
     const caller = stack.currentFrame(self);
     const token = self.heap.token;
     const idx = callICIndex(caller.chunk_id, @intCast(caller.ip));
-    const slot = &thread_caches.get().call_ic[idx];
+    const slot = &thread_caches.get(self.allocator).call_ic[idx];
     if (slot.heap_token == token and
         slot.caller_chunk_id == caller.chunk_id and
         slot.caller_ip == caller.ip and
