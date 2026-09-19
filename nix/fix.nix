@@ -4,8 +4,6 @@
   cpu ? "baseline",
   release ? "fast",
   zig_0_16,
-  pkg-config,
-  libgit2,
   mercurial,
   openssh,
   gnutar,
@@ -37,7 +35,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   zigDeps = zig.fetchDeps {
     inherit (finalAttrs) pname version src;
-    hash = "sha256-Hli2wm6CN7giQPsmQhP9mgnha8EoE9GbaGYnqxlqSkQ=";
+    hash = "sha256-Pn++iuvuuqwRQJ+0dHQXJZx4QliNfUzh49wdhukNvgc=";
   };
 
   postConfigure = ''
@@ -46,12 +44,8 @@ stdenv.mkDerivation (finalAttrs: {
 
   nativeBuildInputs = [
     zig.hook
-    pkg-config
     installShellFiles
     makeWrapper
-  ];
-  buildInputs = [
-    libgit2
   ];
 
   # The direnv library (`use fix` / `use fix_flake`) is a plain shell file, so
@@ -72,7 +66,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   # Mercurial, archive extraction, and ssh-ng daemon transport remain
   # subprocess adapters. Git source transport and local-worktree plumbing
-  # are both provided by libgit2.
+  # are both provided by ziggit, a Zig package.
   postFixup = ''
     wrapProgram $out/bin/fix \
       --prefix PATH : ${

@@ -51,6 +51,13 @@ pub const FetchCache = struct {
     stalled_timeout_seconds: u32 = 300,
     download_speed_kib: u64 = 0,
     ssl_cert_file: ?[]u8 = null,
+    /// The `known_hosts` file that decides host key trust for an `ssh://` Git
+    /// source. ziggit has no default and no bypass: a null path refuses every
+    /// host key, so an SSH fetch works only when this points at a real file.
+    ssh_known_hosts: ?[]u8 = null,
+    /// `$SSH_AUTH_SOCK`. ziggit reads no environment of its own, so an
+    /// `ssh://` Git source gets its agent credential from here or not at all.
+    ssh_auth_sock: ?[]u8 = null,
     flake_registry_url: ?[]u8 = null,
     /// Same-process single-flight for mutable source refreshes. Stripes keep
     /// the structure fixed-size while ensuring identical URLs cannot race.
@@ -115,6 +122,8 @@ pub const FetchCache = struct {
         }
         if (self.cache_root) |root| self.allocator.free(root);
         if (self.ssl_cert_file) |path| self.allocator.free(path);
+        if (self.ssh_known_hosts) |path| self.allocator.free(path);
+        if (self.ssh_auth_sock) |path| self.allocator.free(path);
         if (self.flake_registry_url) |url| self.allocator.free(url);
         self.auth.deinit();
         if (self.subprocess_env) |*e| e.deinit();
@@ -133,13 +142,32 @@ pub const FetchCache = struct {
     }
 
     /// Set the process environment inherited by tar/hg subprocesses and used
-    /// to derive proxy/TLS settings for the HTTP transport and libgit2.
+    /// to derive proxy/TLS settings for the HTTP transport and ziggit.
     pub fn setEnvironment(self: *FetchCache, env: *const std.process.Environ.Map) !void {
         // Derive every owned field before disturbing the live environment.
         // Absence in the replacement environment deliberately clears a prior
         // environment-derived certificate.
         const ca = env.get("NIX_SSL_CERT_FILE") orelse env.get("SSL_CERT_FILE");
         const replacement_ca = if (ca) |path|
+            if (path.len != 0) try self.allocator.dupe(u8, path) else null
+        else
+            null;
+        errdefer if (replacement_ca) |path| self.allocator.free(path);
+
+        // OpenSSH, and so `git` over SSH, reads this file. Follow it so a host
+        // the user already trusts stays trusted here.
+        const home = env.get("HOME");
+        const replacement_known_hosts = if (home) |path|
+            if (path.len != 0)
+                try std.fs.path.join(self.allocator, &.{ path, ".ssh", "known_hosts" })
+            else
+                null
+        else
+            null;
+        errdefer if (replacement_known_hosts) |path| self.allocator.free(path);
+
+        const sock = env.get("SSH_AUTH_SOCK");
+        const replacement_sock = if (sock) |path|
             if (path.len != 0) try self.allocator.dupe(u8, path) else null
         else
             null;
@@ -150,6 +178,10 @@ pub const FetchCache = struct {
         }
         if (self.ssl_cert_file) |old| self.allocator.free(old);
         self.ssl_cert_file = replacement_ca;
+        if (self.ssh_known_hosts) |old| self.allocator.free(old);
+        self.ssh_known_hosts = replacement_known_hosts;
+        if (self.ssh_auth_sock) |old| self.allocator.free(old);
+        self.ssh_auth_sock = replacement_sock;
         self.env = env;
     }
 
@@ -513,6 +545,8 @@ pub const FetchCache = struct {
             error.FetchTooManyRedirects,
             error.FetchTlsVerificationFailed,
             error.FetchGitRevisionNotFound,
+            // A server saying the repository is not there will say it again.
+            error.FetchGitNotFound,
             => false,
             else => true,
         };
@@ -909,13 +943,15 @@ pub const FetchCache = struct {
         const materialize_path = staging orelse path;
         var attempt: u32 = 1;
         var result = while (true) : (attempt += 1) {
-            break git_transport.materialize(self.allocator, spec.url, materialize_path, spec.rev, spec.ref, spec.submodules, spec.all_refs, spec.shallow, refresh, .{
+            break git_transport.materialize(self.allocator, io, spec.url, materialize_path, spec.rev, spec.ref, spec.submodules, spec.all_refs, spec.shallow, refresh, .{
                 .credentials = if (credential) |value| .{ .username = value.username, .password = value.password } else null,
                 .reporter = git_reporter,
                 .ca_file = self.ssl_cert_file,
                 .proxy_url = self.proxyFor(spec.url),
                 .connect_timeout_seconds = self.connect_timeout_seconds,
                 .stalled_timeout_seconds = self.stalled_timeout_seconds,
+                .known_hosts = self.ssh_known_hosts,
+                .ssh_auth_sock = self.ssh_auth_sock,
             }) catch |err| {
                 if (staging) |value| std.Io.Dir.cwd().deleteTree(io, value) catch {};
                 // A pinned object may not have been in an older shallow/cache
@@ -933,12 +969,14 @@ pub const FetchCache = struct {
             try self.publishStagedDir(io, value, path);
             // If another process won the atomic directory commit, report the
             // revision actually present at the shared final path.
-            result = try git_transport.materialize(self.allocator, spec.url, path, spec.rev, spec.ref, spec.submodules, spec.all_refs, spec.shallow, false, .{
+            result = try git_transport.materialize(self.allocator, io, spec.url, path, spec.rev, spec.ref, spec.submodules, spec.all_refs, spec.shallow, false, .{
                 .credentials = if (credential) |item| .{ .username = item.username, .password = item.password } else null,
                 .ca_file = self.ssl_cert_file,
                 .proxy_url = self.proxyFor(spec.url),
                 .connect_timeout_seconds = self.connect_timeout_seconds,
                 .stalled_timeout_seconds = self.stalled_timeout_seconds,
+                .known_hosts = self.ssh_known_hosts,
+                .ssh_auth_sock = self.ssh_auth_sock,
             });
         }
         if (refresh) try self.writeTimestamp(io, marker);

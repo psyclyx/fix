@@ -10,8 +10,8 @@ jobs:
   # One x86_64-linux build feeds every consumer that needs only the BINARY
   # (12 nixpkgs chunks, the gc detector, both daemon arms) — previously each
   # of those built fix from a cold zig cache. Consumers run inside the same
-  # pinned nix-shell, so the artifact's dynamic deps (libgit2/glibc
-  # store paths) resolve identically.
+  # pinned nix-shell, so the artifact's dynamic deps (glibc store paths)
+  # resolve identically.
   build:
     name: build / ${{ matrix.system }} ${{ matrix.optimize }}
     runs-on: ${{ matrix.runner }}

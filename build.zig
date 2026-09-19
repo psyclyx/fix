@@ -66,6 +66,13 @@ pub fn build(b: *std.Build) void {
     });
     const zurl_mod = zurl_dep.module("zurl");
 
+    const ziggit_dep = b.dependency("ziggit", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const ziggit_mod = ziggit_dep.module("ziggit");
+
     // Keep build modules for durable domain boundaries. Internal subsystems use
     // ordinary file imports beneath these roots so each type has one canonical
     // instance without restating every file edge in the build graph.
@@ -168,7 +175,7 @@ pub fn build(b: *std.Build) void {
     fetchers_mod.addImport("base", base_mod);
     fetchers_mod.addImport("store", store_mod);
     fetchers_mod.addImport("zurl", zurl_mod);
-    fetchers_mod.linkSystemLibrary("libgit2", .{ .use_pkg_config = .force });
+    fetchers_mod.addImport("ziggit", ziggit_mod);
     fetchers_mod.link_libc = true;
 
     const expr_mod = b.addModule("expr", .{

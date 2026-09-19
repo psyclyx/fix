@@ -8,6 +8,10 @@
             .url = "git+https://git.lilithsemi.com/LilithSemi/zurl#388fa599799cb52816036bbf5da0887a1a83e2d3",
             .hash = "zurl-0.1.0-eM4POZ5gjAAKkMaw5XdBeWQ6eSMFpglYaE6WxR3dpt1e",
         },
+        .ziggit = .{
+            .url = "git+https://git.lilithsemi.com/LilithSemi/ziggit.git#33476955c813e3e36b0addf4a61dcedf0dfe42d6",
+            .hash = "ziggit-0.1.0-KYLpgeMPEwCSvXIxDTmqaKWXsizgO0xhx_0wAEQiD0AJ",
+        },
     },
     .paths = .{
         "LICENSE",

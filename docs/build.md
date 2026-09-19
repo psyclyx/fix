@@ -14,7 +14,7 @@ The build-module graph follows independently reusable or consumed groups. Within
 | `syntax` | `src/syntax/root.zig` | `base`, `parser_tables` | independently consumed lexer, parser, and AST |
 | `runtime` | `src/runtime/root.zig` | `build_options`, `base` | value model, heap, interning, thunk/Future, GC, memory tags |
 | `store` | `src/store/root.zig` | `base`, `runtime` | derivations, file snapshots, NAR, realization, daemon protocol/runtime |
-| `fetchers` | `src/fetchers/root.zig` | `base`, `runtime`, `store`, `zurl`, libgit2 | forge planning, remote-source cache and transports |
+| `fetchers` | `src/fetchers/root.zig` | `base`, `runtime`, `store`, `zurl`, `ziggit` | forge planning, remote-source cache and transports |
 | `expr` | `src/expr/root.zig` | `build_options`, `base`, `syntax`, `runtime`, `store`, `fetchers` | bytecode/compiler/VM, builtins, evaluator workers and diagnostics |
 | `cli` | `src/cli/root.zig` | `base`, `expr`, `runtime`, `syntax`, `store` | command surface, argument parsing, rendering, progress |
 | `process_support` | `src/process_support.zig` | `base`, `runtime` | executable-only allocator composition |
