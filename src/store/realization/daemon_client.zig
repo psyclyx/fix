@@ -25,6 +25,7 @@ pub const Client = struct {
     active_driver: ?backend.Driver = null,
     backend_mu: sync.BlockingMutex = .{},
     backend_driver: ?backend.Driver = null,
+    backend_started: bool = false,
     test_owned_runtime: if (builtin.is_test) ?*DaemonRuntime else void = if (builtin.is_test) null else {},
 
     pub fn init(allocator: std.mem.Allocator) Client {
@@ -106,6 +107,7 @@ pub const Client = struct {
         if (self.active_driver != null) return error.BackendAlreadyStarted;
         if (self.backend_driver) |old| old.destroy();
         self.backend_driver = selected;
+        self.backend_started = false;
     }
 
     pub fn enableWrites(self: *Client) void {
@@ -123,6 +125,12 @@ pub const Client = struct {
         if (self.runtime) |runtime| runtime.setExecutor(null);
         self.pool_executor = null;
         self.runtime = null;
+        // `active_driver` is `ensureBackend`'s state, so drop it under its lock.
+        // Both kinds of driver stay started across this, and neither may be
+        // started twice: `backend_started` guards a selected driver, and the
+        // default daemon is recovered from its runtime by `startedDriver`.
+        self.backend_mu.lock();
+        defer self.backend_mu.unlock();
         self.active_driver = null;
     }
 
@@ -136,17 +144,34 @@ pub const Client = struct {
         self.backend_mu.lock();
         defer self.backend_mu.unlock();
         if (self.active_driver) |driver| return driver;
-        const driver = self.backend_driver orelse blk: {
-            const runtime = self.runtime orelse return error.StoreUnavailable;
-            const io = self.io orelse return error.StoreUnavailable;
-            break :blk try runtime.configureDaemon(
-                self.allocator,
-                io,
-                self.socket,
-                self.options,
-                self.writes_enabled,
-            );
-        };
+        if (self.backend_driver) |driver| {
+            // A driver's `start` is not idempotent (it spawns its worker set),
+            // and a selection outlives `clearExecution`, so start it at most
+            // once. The default daemon has its own guard in `configureDaemon`.
+            if (!self.backend_started) {
+                try driver.start();
+                self.backend_started = true;
+            }
+            self.active_driver = driver;
+            return driver;
+        }
+        const runtime = self.runtime orelse return error.StoreUnavailable;
+        // A runtime re-attached after `clearExecution` keeps the pool it already
+        // started, and its configuration was fixed at that first start, so take
+        // the running driver back rather than asking `configureDaemon` to
+        // reconfigure a started backend and refuse.
+        if (runtime.startedDriver()) |driver| {
+            self.active_driver = driver;
+            return driver;
+        }
+        const io = self.io orelse return error.StoreUnavailable;
+        const driver = try runtime.configureDaemon(
+            self.allocator,
+            io,
+            self.socket,
+            self.options,
+            self.writes_enabled,
+        );
         try driver.start();
         self.active_driver = driver;
         return driver;

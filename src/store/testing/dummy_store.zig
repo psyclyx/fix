@@ -15,6 +15,7 @@ pub const DummyStore = struct {
     objects: std.StringHashMapUnmanaged([]u8) = .empty,
     effects: std.ArrayListUnmanaged(Effect) = .empty,
     returned_path: ?[]u8 = null,
+    starts: usize = 0,
 
     pub const Kind = enum {
         check,
@@ -88,6 +89,12 @@ pub const DummyStore = struct {
         return count;
     }
 
+    pub fn startCount(self: *DummyStore) usize {
+        self.mu.lock();
+        defer self.mu.unlock();
+        return self.starts;
+    }
+
     pub fn effectsLen(self: *DummyStore) usize {
         self.mu.lock();
         defer self.mu.unlock();
@@ -134,7 +141,12 @@ pub const DummyStore = struct {
         return @ptrCast(@alignCast(raw));
     }
 
-    fn start(_: *anyopaque) !void {}
+    fn start(raw: *anyopaque) !void {
+        const self = selfFrom(raw);
+        self.mu.lock();
+        defer self.mu.unlock();
+        self.starts += 1;
+    }
 
     fn run(raw: *anyopaque, work: backend.WorkFn, context: *anyopaque) !void {
         work(raw, context);
