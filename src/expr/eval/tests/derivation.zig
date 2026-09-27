@@ -520,3 +520,20 @@ test "derivationStrict rejects non-attrset argument" {
     try std.testing.expectError(error.TypeError, renderForTest("builtins.derivationStrict 1"));
     try std.testing.expectError(error.TypeError, renderForTest("builtins.derivationStrict [ ]"));
 }
+
+test "structured attrs serialize a set's outPath whatever its type" {
+    const structured = try renderForTest(
+        \\let
+        \\  pkg = builtins.derivation {
+        \\    name = "structured";
+        \\    system = "x86_64-linux";
+        \\    builder = "/bin/sh";
+        \\    __structuredAttrs = true;
+        \\    a = { outPath = 1; };
+        \\    b = { outPath.c = [ 1.5 ]; };
+        \\  };
+        \\in builtins.toJSON [ pkg.drvPath pkg.outPath ]
+    );
+    defer std.testing.allocator.free(structured);
+    try std.testing.expectEqualStrings("\"[\\\"/nix/store/ja4ijxiwz0gpbif7lbsigi97flsqdpq1-structured.drv\\\",\\\"/nix/store/a3j450i2z30syi4w2iqvda8r48wqynf5-structured\\\"]\"", structured);
+}

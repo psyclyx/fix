@@ -41,7 +41,7 @@ const appendContextEntry = string_context.appendContextEntry;
 const coerceDerivationStringValue = strings.coerceDerivationStringValue;
 const contextEntriesForValue = string_context.contextEntriesForValue;
 const makeBuiltinThunk = shared.makeBuiltinThunk;
-const jsonAttrsStringValue = serial.jsonAttrsStringValue;
+const peelToStringOutPath = serial.peelToStringOutPath;
 const isPlainString = strings.isPlainString;
 const isStringLike = strings.isStringLike;
 const sourcePathStringValue = strings.sourcePathStringValue;
@@ -759,17 +759,25 @@ fn appendStructuredJsonValue(
             try out.append(self.allocator, ']');
         },
         .attrs => {
-            if (try jsonAttrsStringValue(self, forced)) |string_value| {
-                try appendStructuredJsonStringValue(self, out, string_value, inputs, owned_strings);
-                return;
+            const peeled = try peelToStringOutPath(self, forced);
+            const gc_roots = vm_force.rootsBegin(self);
+            defer vm_force.rootsEnd(self, gc_roots);
+            vm_force.rootKeep(self, peeled.value);
+            if (!peeled.value.isAttrs()) {
+                // A path from `__toString` stays a plain path string, not a
+                // store path (Nix's quirk).
+                if (peeled.through_to_string and peeled.value.isPath()) {
+                    return appendJsonString(self, out, self.intern.get(peeled.value.asInternId()));
+                }
+                return appendStructuredJsonValue(self, out, peeled.value, inputs, owned_strings, seen);
             }
 
-            const attrs_id = forced.asObjectId();
+            const attrs_id = peeled.value.asObjectId();
             if (!try shared.enterJsonObject(self, .attrs, attrs_id, seen)) return error.RecursiveThunk;
             defer _ = seen.pop();
 
             try out.append(self.allocator, '{');
-            const entries = try sortedAttrEntries(self, forced);
+            const entries = try sortedAttrEntries(self, peeled.value);
             defer self.allocator.free(entries);
             for (entries, 0..) |entry, index| {
                 if (index != 0) try out.append(self.allocator, ',');

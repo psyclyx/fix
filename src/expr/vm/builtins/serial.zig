@@ -23,10 +23,11 @@ const strings = @import("strings.zig");
 const string_context = @import("string_context.zig");
 const vm_force = @import("../force.zig");
 const vm_strings = @import("../strings.zig");
+const vm_closures = @import("../closures.zig");
+const vm_trace = @import("../trace.zig");
 const equality = @import("../equality.zig");
 
 const appendContextEntry = string_context.appendContextEntry;
-const coerceStringContextValue = strings.coerceStringContextValue;
 const contextEntriesForValue = string_context.contextEntriesForValue;
 const isPlainString = strings.isPlainString;
 const sourcePathStringValue = strings.sourcePathStringValue;
@@ -103,10 +104,15 @@ fn writeJsonValueInner(
         },
         .list => try writeJsonList(self, writer, forced.asObjectId(), seen, context),
         .attrs => {
-            if (try jsonAttrsStringValue(self, forced)) |string_value| {
-                try writeJsonStringValue(self, writer, string_value, context);
+            const peeled = try peelToStringOutPath(self, forced);
+            vm_force.rootKeep(self, peeled.value);
+            if (peeled.value.isAttrs()) {
+                try writeJsonAttrs(self, writer, peeled.value.asObjectId(), seen, context);
+            } else if (peeled.through_to_string and peeled.value.isPath()) {
+                // Nix's quirk: a path from `__toString` isn't copied.
+                try writeJsonStringValue(self, writer, Value.string(peeled.value.asInternId()), context);
             } else {
-                try writeJsonAttrs(self, writer, forced.asObjectId(), seen, context);
+                try writeJsonValueInner(self, writer, peeled.value, seen, context);
             }
         },
         .closure, .builtin, .builtin_closure, .partial_app => return error.TypeError,
@@ -139,24 +145,53 @@ fn writeJsonStringValue(
     }
 }
 
-pub fn jsonAttrsStringValue(self: *VM, attrs: Value) !?Value {
-    const attrs_id = attrs.asObjectId();
+pub const Peeled = struct {
+    /// Forced: anything but a set, or a set with neither attribute.
+    value: Value,
+    /// Some `__toString` was called on the way.
+    through_to_string: bool,
+};
 
-    const to_string_id = try self.intern.intern("__toString");
-    if (self.heap.getAttrValue(attrs_id, to_string_id)) |_| {
-        return try coerceStringContextValue(self, attrs);
-    } else |err| switch (err) {
-        error.MissingAttribute => {},
-        else => return err,
-    }
+/// Nix's `peelToStringOutPath`, how `toJSON` (and structured attrs) see a
+/// set: follow `__toString` (called with the set) and else `outPath`, again
+/// and again, and serialize whatever is left. So `toJSON { outPath = 1; }`
+/// is `1` and `toJSON { outPath.a = 1; }` is `{"a":1}`. A `__toString` must
+/// end in a string or a path. The caller roots the result.
+pub fn peelToStringOutPath(self: *VM, attrs: Value) !Peeled {
+    return peelFrom(self, attrs, false);
+}
 
-    const out_path_id = try self.intern.intern("outPath");
-    if (self.heap.getAttrValue(attrs_id, out_path_id)) |_| {
-        return try coerceStringContextValue(self, attrs);
-    } else |err| switch (err) {
-        error.MissingAttribute => return null,
-        else => return err,
+fn peelFrom(self: *VM, value: Value, through_to_string: bool) anyerror!Peeled {
+    const forced = try vm_force.forceValue(self, value);
+    if (!forced.isAttrs()) return peeledEnd(self, forced, through_to_string);
+    try vm_strings.coercionEnter(self);
+    defer vm_strings.coercionExit(self);
+    const gc_roots = vm_force.rootsBegin(self);
+    defer vm_force.rootsEnd(self, gc_roots);
+    vm_force.rootKeep(self, forced);
+
+    const attrs_id = forced.asObjectId();
+    if (try self.heap.getAttrValueOpt(attrs_id, try self.intern.intern("__toString"))) |to_string| {
+        const result = try vm_closures.callValue(self, try vm_force.forceValue(self, to_string), forced);
+        vm_force.rootKeep(self, result);
+        return peelFrom(self, result, true);
     }
+    if (try self.heap.getAttrValueOpt(attrs_id, try self.intern.intern("outPath"))) |out_path| {
+        return peelFrom(self, out_path, through_to_string);
+    }
+    return peeledEnd(self, forced, through_to_string);
+}
+
+fn peeledEnd(self: *VM, value: Value, through_to_string: bool) !Peeled {
+    if (through_to_string and !isStringLikeValue(value)) {
+        try vm_trace.setErrorMessage(self, "`__toString` should return a string");
+        return error.TypeError;
+    }
+    return .{ .value = value, .through_to_string = through_to_string };
+}
+
+fn isStringLikeValue(value: Value) bool {
+    return value.isString() or value.isContextString() or value.isHeapString() or value.isPath();
 }
 
 fn writeJsonList(

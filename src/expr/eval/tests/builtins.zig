@@ -235,6 +235,16 @@ test "evaluate JSON builtins" {
     defer std.testing.allocator.free(to_string_json);
     try std.testing.expectEqualStrings("\"\\\"pkg\\\"\"", to_string_json);
 
+    // Nix serializes whatever `outPath` (or `__toString`) leads to.
+    const peeled_json = try renderForTest(
+        \\builtins.toJSON [ { outPath = 1; } { outPath = [ 1 ]; } { outPath.foo = true; }
+        \\  { __toString = self: { outPath = "x"; }; } { outPath = null; } { __toString = _: /x/y; } ]
+    );
+    defer std.testing.allocator.free(peeled_json);
+    try std.testing.expectEqualStrings("\"[1,[1],{\\\"foo\\\":true},\\\"x\\\",null,\\\"/x/y\\\"]\"", peeled_json);
+    try std.testing.expectError(error.TypeError, renderForTest("builtins.toJSON { __toString = _: 1; }"));
+    try std.testing.expectError(error.TypeError, renderForTest("builtins.toJSON { __toString = _: { a = 1; }; }"));
+
     const json_preserves_string_context = try renderForTest(
         \\let
         \\  dep = builtins.derivation { name = "dep"; outputs = [ "out" "dev" ]; system = "x86_64-linux"; builder = "/bin/sh"; };
