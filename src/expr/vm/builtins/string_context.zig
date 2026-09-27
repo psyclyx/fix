@@ -13,6 +13,7 @@ const strings = @import("strings.zig");
 const context_merge = @import("../context_merge.zig");
 const vm_force = @import("../force.zig");
 const vm_trace = @import("../trace.zig");
+const vm_strings = @import("../strings.zig");
 
 /// The context-merge algorithm now lives in `vm/context_merge.zig`. Re-exported
 /// here so the many `string_context.appendContextEntry` call sites (and this
@@ -64,17 +65,44 @@ pub fn builtinUnsafeDiscardStringContext(self: *VM, arg: Value) !Value {
 }
 
 pub fn builtinUnsafeDiscardOutputDependency(self: *VM, arg: Value) !Value {
-    const value = try vm_force.forceValue(self, arg);
-    if (!strings.isStringLike(value)) return error.TypeError;
+    // Nix coerces the argument as `"${…}"` does (a path is copied to the
+    // store), then turns a dependency on all of a derivation's outputs (a
+    // `drvPath`) into a dependency on the `.drv` file itself. Dependencies
+    // on single outputs (`"${drv}"`) and on plain paths stay as they are.
+    const gc_roots = vm_force.rootsBegin(self);
+    defer vm_force.rootsEnd(self, gc_roots);
+    const value = try vm_strings.coerceLanguageStringValue(self, arg);
+    vm_force.rootKeep(self, value);
     const text_id = try strings.stringNameId(self, value);
     var entries: std.ArrayListUnmanaged(heap_mod.AttrEntry) = .empty;
     defer entries.deinit(self.allocator);
     {
         const cv = try contextEntriesForValue(self, value);
-        for (cv.names) |n| try appendContextEntry(self, &entries, n, try pathContextValue(self));
+        for (cv.names, cv.values) |n, v| try appendContextEntry(self, &entries, n, try withoutAllOutputs(self, v));
     }
     if (entries.items.len == 0) return Value.string(text_id);
     return Value.contextString(try self.heap.addContextStringEntries(text_id, entries.items));
+}
+
+/// A context descriptor with `allOutputs` replaced by `path`, keeping any
+/// `outputs`.
+fn withoutAllOutputs(self: *VM, descriptor: Value) !Value {
+    const forced = try vm_force.forceValue(self, descriptor);
+    if (!forced.isAttrs()) return forced;
+    const id = forced.asObjectId();
+    const all_outputs = (try self.heap.getAttrValueOpt(id, try self.intern.intern("allOutputs"))) orelse return forced;
+    if (!(try vm_force.forceValue(self, all_outputs)).asBool()) return forced;
+
+    var entries: [2]heap_mod.AttrEntry = undefined;
+    var n: usize = 0;
+    entries[n] = .{ .name = try self.intern.intern("path"), .value = Value.boolVal(true) };
+    n += 1;
+    const outputs_id = try self.intern.intern("outputs");
+    if (try self.heap.getAttrValueOpt(id, outputs_id)) |outputs| {
+        entries[n] = .{ .name = outputs_id, .value = outputs };
+        n += 1;
+    }
+    return Value.attrs(try self.heap.addAttrs(entries[0..n]));
 }
 
 pub fn builtinAddDrvOutputDependencies(self: *VM, arg: Value) !Value {

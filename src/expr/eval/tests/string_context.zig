@@ -97,3 +97,26 @@ test "split keeps the context of a string it does not split" {
     // ...and builds context-free pieces around a match.
     try std.testing.expect(!(try ev.evaluate(prelude ++ " builtins.hasContext (builtins.head (builtins.split \"/\" s))")).asBool());
 }
+
+test "unsafeDiscardOutputDependency only turns all-outputs context into the .drv path" {
+    const renderStrictForTest = @import("../test_helpers.zig").renderStrictForTest;
+    const got = try renderStrictForTest(
+        \\let
+        \\  d = builtins.derivation { name = "d"; system = "x"; builder = "/b"; outputs = [ "out" "dev" ]; };
+        \\  s = "${d.dev}${d.drvPath}";
+        \\in [
+        \\  (builtins.getContext (builtins.unsafeDiscardOutputDependency s))
+        \\  (builtins.getContext (builtins.unsafeDiscardOutputDependency "${d}"))
+        \\  (builtins.unsafeDiscardOutputDependency { outPath = "x"; })
+        \\  (builtins.getContext (builtins.unsafeDiscardOutputDependency { __toString = _: d.drvPath; }))
+        \\]
+    );
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings(
+        "[ { \"/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d.drv\" = { outputs = [ \"dev\" ]; path = true; }; } " ++
+            "{ \"/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d.drv\" = { outputs = [ \"out\" ]; }; } " ++
+            "\"x\" " ++
+            "{ \"/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d.drv\" = { path = true; }; } ]",
+        got,
+    );
+}
