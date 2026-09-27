@@ -146,6 +146,32 @@ pub fn coerceAttrsStringContextValue(self: *VM, attrs: Value) !Value {
     return coerceStringContextValue(self, out_path);
 }
 
+/// Nix's `coerceToString` with `copyToStore = false`: a path stays its own
+/// text.
+pub fn coerceWithoutCopy(self: *VM, arg: Value) anyerror!Value {
+    const value = try vm_force.forceValue(self, arg);
+    switch (value.kind()) {
+        .string, .string_context, .heap_string => return value,
+        .path => return Value.string(value.asInternId()),
+        .attrs => {
+            try vm_strings.coercionEnter(self);
+            defer vm_strings.coercionExit(self);
+            const gc_roots = vm_force.rootsBegin(self);
+            defer vm_force.rootsEnd(self, gc_roots);
+            vm_force.rootKeep(self, value);
+            const id = value.asObjectId();
+            if (try self.heap.getAttrValueOpt(id, try self.intern.intern("__toString"))) |to_string| {
+                return coerceWithoutCopy(self, try vm_closures.callValue(self, try vm_force.forceValue(self, to_string), value));
+            }
+            if (try self.heap.getAttrValueOpt(id, try self.intern.intern("outPath"))) |out_path| {
+                return coerceWithoutCopy(self, out_path);
+            }
+            return vm_trace.coercionError(self, value);
+        },
+        else => return vm_trace.coercionError(self, value),
+    }
+}
+
 pub fn sourcePathStringValue(self: *VM, path_id: InternId) !Value {
     const path = self.intern.get(path_id);
     if (!std.fs.path.isAbsolute(path)) return string_context.contextStringWithPath(self, path_id);

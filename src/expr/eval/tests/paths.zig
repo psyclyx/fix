@@ -110,3 +110,17 @@ test "a path literal may start with - or +" {
     defer std_testing.allocator.free(applied);
     try std_testing.expectEqualStrings("[ /test/-./x /test/+/y \"path\" ]", applied);
 }
+
+test "toPath coerces like interpolation without copying, and canonicalizes" {
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "builtins.toPath { outPath = \"/x\"; }", "\"/x\"" },
+        .{ "builtins.toPath { __toString = _: /y; }", "\"/y\"" },
+        .{ "builtins.toPath \"/a/../b//c/./d/\"", "\"/b/c/d\"" },
+    };
+    for (cases) |case| {
+        const got = try renderForTest(case[0]);
+        defer std_testing.allocator.free(got);
+        try std_testing.expectEqualStrings(case[1], got);
+    }
+    try std_testing.expectError(error.RelativePath, renderForTest("builtins.toPath \"a\""));
+}

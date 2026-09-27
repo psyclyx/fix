@@ -120,3 +120,36 @@ test "unsafeDiscardOutputDependency only turns all-outputs context into the .drv
         got,
     );
 }
+
+test "hasContext and appendContext take strings, not paths or sets" {
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+
+    try std.testing.expectError(error.TypeError, ev.evaluate("builtins.hasContext /x"));
+    try std.testing.expectError(error.TypeError, ev.evaluate("builtins.hasContext { outPath = \"x\"; }"));
+    try std.testing.expectError(error.TypeError, ev.evaluate("builtins.appendContext /x { }"));
+    // Keys must be store paths, and output context needs a derivation.
+    try std.testing.expectError(error.TypeError, ev.evaluate("builtins.appendContext \"a\" { a = { path = true; }; }"));
+    try std.testing.expectError(error.TypeError, ev.evaluate(
+        "builtins.appendContext \"a\" { \"/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d\" = { outputs = [ \"out\" ]; }; }",
+    ));
+    try std.testing.expectError(error.TypeError, ev.evaluate(
+        "builtins.appendContext \"a\" { \"/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d\" = { allOutputs = true; }; }",
+    ));
+}
+
+test "appendContext keeps only what an entry adds up to" {
+    const renderStrictForTest = @import("../test_helpers.zig").renderStrictForTest;
+    const got = try renderStrictForTest(
+        \\let drv = "/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d.drv"; in [
+        \\  (builtins.getContext (builtins.appendContext "a" { ${drv} = { outputs = [ "b" "a" "a" ]; path = false; }; }))
+        \\  (builtins.getContext (builtins.appendContext "a" { ${drv} = { outputs = [ ]; path = false; }; }))
+        \\  (builtins.hasContext (builtins.appendContext "a" { ${drv} = { }; }))
+        \\]
+    );
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings(
+        "[ { \"/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d.drv\" = { outputs = [ \"a\" \"b\" ]; }; } { } false ]",
+        got,
+    );
+}

@@ -25,6 +25,30 @@ pub fn isValid(name: []const u8) bool {
     return true;
 }
 
+/// Is `path` a store path: `<store_dir>/<32-char nix32 hash>-<valid name>`,
+/// with nothing after the name? (Nix's `isStorePath`.)
+pub fn isStorePath(store_dir: []const u8, path: []const u8) bool {
+    if (!std.mem.startsWith(u8, path, store_dir)) return false;
+    const rest = path[store_dir.len..];
+    if (rest.len < 1 + 32 + 1 or rest[0] != '/' or rest[1 + 32] != '-') return false;
+    for (rest[1 .. 1 + 32]) |c| {
+        if (std.mem.indexOfScalar(u8, nix32_alphabet, c) == null) return false;
+    }
+    return isValid(rest[1 + 32 + 1 ..]);
+}
+
+const nix32_alphabet = "0123456789abcdfghijklmnpqrsvwxyz";
+
+test "isStorePath wants a hash and a valid name directly in the store" {
+    const t = std.testing;
+    try t.expect(isStorePath("/nix/store", "/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d.drv"));
+    try t.expect(!isStorePath("/nix/store", "/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d/sub"));
+    try t.expect(!isStorePath("/nix/store", "/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy"));
+    try t.expect(!isStorePath("/nix/store", "/nix/store/e4s49lw7m6vgvdrrkq4iilvzfq7848vy-d"));
+    try t.expect(!isStorePath("/nix/store", "/nix/storex/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d"));
+    try t.expect(!isStorePath("/nix/store", "a"));
+}
+
 test "isValid accepts and rejects per Nix checkName" {
     const t = std.testing;
     try t.expect(isValid("hello-1.0"));

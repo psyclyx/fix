@@ -14,6 +14,7 @@ const context_merge = @import("../context_merge.zig");
 const vm_force = @import("../force.zig");
 const vm_trace = @import("../trace.zig");
 const vm_strings = @import("../strings.zig");
+const store_name = @import("store").derivation.store_name;
 
 /// The context-merge algorithm now lives in `vm/context_merge.zig`. Re-exported
 /// here so the many `string_context.appendContextEntry` call sites (and this
@@ -31,27 +32,125 @@ pub fn builtinGetContext(self: *VM, arg: Value) !Value {
 }
 
 pub fn builtinHasContext(self: *VM, arg: Value) !Value {
+    // Nix's `forceString`: a string, not a path or a set.
     const value = try vm_force.forceValue(self, arg);
+    if (!strings.isPlainString(value)) return vm_trace.typeErrorExpected(self, "a string", value);
     return Value.boolVal((try contextEntriesForValue(self, value)).len() != 0);
 }
 
 pub fn builtinAppendContext(self: *VM, string_arg: Value, context_arg: Value) !Value {
     const string_value = try vm_force.forceValue(self, string_arg);
-    if (!strings.isStringLike(string_value)) return error.TypeError;
+    if (!strings.isPlainString(string_value)) return vm_trace.typeErrorExpected(self, "a string", string_value);
     const context_value = try vm_force.forceValue(self, context_arg);
-    if (!context_value.isAttrs()) return error.TypeError;
+    if (!context_value.isAttrs()) return vm_trace.typeErrorExpected(self, "a set", context_value);
 
     var entries: std.ArrayListUnmanaged(heap_mod.AttrEntry) = .empty;
     defer entries.deinit(self.allocator);
     {
         const sv = try contextEntriesForValue(self, string_value);
         for (sv.names, sv.values) |n, v| try appendContextEntry(self, &entries, n, v);
-        const cv = try self.heap.materializeAttrs(context_value.asObjectId());
-        for (cv.names, cv.values) |n, v| try appendContextEntry(self, &entries, n, v);
+        const context_id = context_value.asObjectId();
+        const n = (try self.heap.materializeAttrs(context_id)).len();
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            // Re-read the view: normalizing forces, which can move it.
+            const cv = try self.heap.materializeAttrs(context_id);
+            const name = cv.names[i];
+            const descriptor = (try contextDescriptorArg(self, name, cv.values[i])) orelse continue;
+            // GC: the accumulated descriptors aren't reachable from the stack.
+            const gc_roots = vm_force.rootsBegin(self);
+            defer vm_force.rootsEnd(self, gc_roots);
+            for (entries.items) |e| vm_force.rootKeep(self, e.value);
+            try appendContextEntry(self, &entries, name, descriptor);
+        }
     }
 
     if (entries.items.len == 0) return Value.string(try strings.stringNameId(self, string_value));
     return Value.contextString(try self.heap.addContextStringEntries(try strings.stringNameId(self, string_value), entries.items));
+}
+
+/// One `appendContext` entry as Nix reads it: the name must be a store path,
+/// `path` and `allOutputs` are booleans, `outputs` a list of strings, and
+/// only what they add up to is kept: `path = false` or `outputs = [ ]` add
+/// nothing, outputs are sorted and deduplicated, and output dependencies
+/// need a `.drv`. Null when the entry adds nothing.
+fn contextDescriptorArg(self: *VM, name_id: InternId, value: Value) !?Value {
+    const name = self.intern.get(name_id);
+    if (!store_name.isStorePath(self.realization.store_dir, name)) {
+        const message = try std.fmt.allocPrint(self.allocator, "context key '{s}' is not a store path", .{name});
+        defer self.allocator.free(message);
+        try vm_trace.setErrorMessage(self, message);
+        return error.TypeError;
+    }
+    const is_drv = std.mem.endsWith(u8, name, ".drv");
+    const descriptor = try vm_force.forceValue(self, value);
+    if (!descriptor.isAttrs()) return vm_trace.typeErrorExpected(self, "a set", descriptor);
+    const gc_roots = vm_force.rootsBegin(self);
+    defer vm_force.rootsEnd(self, gc_roots);
+    vm_force.rootKeep(self, descriptor);
+    const id = descriptor.asObjectId();
+
+    var entries: [3]heap_mod.AttrEntry = undefined;
+    var n: usize = 0;
+    const path_id = try self.intern.intern("path");
+    if (try self.heap.getAttrValueOpt(id, path_id)) |path| {
+        if (try forceBool(self, path)) {
+            entries[n] = .{ .name = path_id, .value = Value.boolVal(true) };
+            n += 1;
+        }
+    }
+    const all_outputs_id = try self.intern.intern("allOutputs");
+    if (try self.heap.getAttrValueOpt(id, all_outputs_id)) |all_outputs| {
+        if (try forceBool(self, all_outputs)) {
+            if (!is_drv) return notADerivation(self, "all-outputs", name);
+            entries[n] = .{ .name = all_outputs_id, .value = Value.boolVal(true) };
+            n += 1;
+        }
+    }
+    const outputs_id = try self.intern.intern("outputs");
+    if (try self.heap.getAttrValueOpt(id, outputs_id)) |outputs_arg| {
+        const outputs = try vm_force.forceValue(self, outputs_arg);
+        if (!outputs.isList()) return vm_trace.typeErrorExpected(self, "a list", outputs);
+        const list_id = outputs.asObjectId();
+        const len = try self.heap.getListLen(list_id);
+        if (len != 0 and !is_drv) return notADerivation(self, "derivation output", name);
+        var names: std.ArrayListUnmanaged(InternId) = .empty;
+        defer names.deinit(self.allocator);
+        var i: usize = 0;
+        while (i < len) : (i += 1) {
+            const output = try vm_force.forceValue(self, try self.heap.getListItem(list_id, i));
+            if (!output.isString() and !output.isHeapString()) return vm_trace.typeErrorExpected(self, "a string without context", output);
+            const output_id = try strings.stringNameId(self, output);
+            if (std.mem.indexOfScalar(InternId, names.items, output_id) == null) try names.append(self.allocator, output_id);
+        }
+        if (names.items.len != 0) {
+            std.mem.sort(InternId, names.items, self, internIdTextLessThan);
+            const values = try self.allocator.alloc(Value, names.items.len);
+            defer self.allocator.free(values);
+            for (names.items, values) |output_id, *v| v.* = Value.string(output_id);
+            entries[n] = .{ .name = outputs_id, .value = Value.list(try self.heap.addList(values)) };
+            n += 1;
+        }
+    }
+    if (n == 0) return null;
+    return Value.attrs(try self.heap.addAttrs(entries[0..n]));
+}
+
+fn forceBool(self: *VM, value: Value) !bool {
+    const forced = try vm_force.forceValue(self, value);
+    if (!forced.isBool()) return vm_trace.typeErrorExpected(self, "a Boolean", forced);
+    return forced.asBool();
+}
+
+fn notADerivation(self: *VM, what: []const u8, name: []const u8) anyerror {
+    const message = try std.fmt.allocPrint(self.allocator, "tried to add {s} context of {s}, which is not a derivation, to a string", .{ what, name });
+    defer self.allocator.free(message);
+    try vm_trace.setErrorMessage(self, message);
+    return error.TypeError;
+}
+
+fn internIdTextLessThan(self: *VM, a: InternId, b: InternId) bool {
+    return std.mem.lessThan(u8, self.intern.get(a), self.intern.get(b));
 }
 
 pub fn builtinUnsafeDiscardStringContext(self: *VM, arg: Value) !Value {
