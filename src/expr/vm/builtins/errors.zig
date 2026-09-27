@@ -155,7 +155,7 @@ pub fn builtinWarn(self: *VM, message_arg: Value, value_arg: Value) !Value {
     return vm_force.forceValue(self, value_arg);
 }
 
-fn emitLanguageEffect(self: *VM, kind: effects.Kind, message: []const u8) !void {
+pub fn emitLanguageEffect(self: *VM, kind: effects.Kind, message: []const u8) !void {
     const store = self.effects orelse return;
     self.effect_epoch +%= 1;
     if (self.speculation.active) {

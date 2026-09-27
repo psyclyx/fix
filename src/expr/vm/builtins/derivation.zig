@@ -14,8 +14,10 @@ const InternId = types.InternId;
 const ObjectId = types.ObjectId;
 const heap_mod = @import("runtime").heap;
 const derivation = @import("store").derivation;
+const nix_hash = @import("runtime").hash;
 const source_paths = @import("store").realization.source_path;
 const attrsets = @import("attrsets.zig");
+const errors = @import("errors.zig");
 const serial = @import("serial.zig");
 const shared = @import("shared.zig");
 const strings = @import("strings.zig");
@@ -589,52 +591,86 @@ fn applyFixedOutputAttrs(
     outputs: []derivation.DrvOutput,
     owned_strings: *std.ArrayListUnmanaged([]u8),
 ) !void {
+    // Nix checks `outputHashMode` even without an `outputHash`.
+    const recursive = try fixedOutputRecursive(self, attrs_id);
     const hash_value = self.heap.getAttrValue(attrs_id, try self.intern.intern("outputHash")) catch |err| switch (err) {
         error.MissingAttribute => return,
         else => return err,
     };
-    if (outputs.len != 1) return error.InvalidDerivationOutput;
+    if (outputs.len != 1 or !std.mem.eql(u8, outputs[0].name, "out")) {
+        try vm_trace.setErrorMessage(self, "multiple outputs are not supported in fixed-output derivations");
+        return error.InvalidDerivationOutput;
+    }
     const hash_forced = try vm_force.forceValue(self, hash_value);
     if (!isPlainString(hash_forced)) return error.TypeError;
-    const mode = blk: {
-        const mode_value = self.heap.getAttrValue(attrs_id, try self.intern.intern("outputHashMode")) catch |err| switch (err) {
-            error.MissingAttribute => break :blk "flat",
-            else => return err,
-        };
-        const forced = try vm_force.forceValue(self, mode_value);
-        if (!isPlainString(forced)) return error.TypeError;
-        break :blk try vm_strings.stringBytes(self, forced);
-    };
     const hash_text = try vm_strings.stringBytes(self, hash_forced);
-    const algo = try fixedOutputHashAlgorithm(self, attrs_id, hash_text);
-    const hash_hex = derivation.hashToBase16(self.allocator, algo, hash_text) catch |err| switch (err) {
-        error.InvalidHashAlgorithm => {
-            const msg = try std.fmt.allocPrint(self.allocator, "hash '{s}' should have type '{s}'", .{ hash_text, algo });
-            defer self.allocator.free(msg);
-            try vm_trace.setErrorMessage(self, msg);
-            return err;
-        },
-        error.InvalidHash => {
-            const msg = try std.fmt.allocPrint(self.allocator, "invalid hash '{s}'", .{hash_text});
-            defer self.allocator.free(msg);
-            try vm_trace.setErrorMessage(self, msg);
-            return err;
-        },
-        else => return err,
-    };
+    const digest = try fixedOutputHash(self, hash_text, try fixedOutputHashAlgorithm(self, attrs_id));
+    const hash_hex = try nix_hash.format(self.allocator, digest, .base16);
     errdefer self.allocator.free(hash_hex);
     try owned_strings.append(self.allocator, hash_hex);
-    const hash_algo = if (std.mem.eql(u8, mode, "recursive")) blk: {
+    const algo = @tagName(digest.algorithm);
+    const hash_algo = if (recursive) blk: {
         const text = try std.fmt.allocPrint(self.allocator, "r:{s}", .{algo});
         errdefer self.allocator.free(text);
         try owned_strings.append(self.allocator, text);
         break :blk text;
-    } else if (std.mem.eql(u8, mode, "flat")) blk: {
-        // `algo` is interned text or a slice of it — stable, no dupe.
-        break :blk algo;
-    } else return error.InvalidHashMode;
+    } else algo;
     outputs[0].hash_algo = hash_algo;
     outputs[0].hash = hash_hex;
+}
+
+/// Whether `outputHashMode` asks for a NAR hash. Nix's names: `recursive`
+/// is the old name of `nar`.
+fn fixedOutputRecursive(self: *VM, attrs_id: ObjectId) !bool {
+    const mode_value = (try self.heap.getAttrValueOpt(attrs_id, try self.intern.intern("outputHashMode"))) orelse return false;
+    const forced = try vm_force.forceValue(self, mode_value);
+    if (!isPlainString(forced)) return error.TypeError;
+    const mode = try vm_strings.stringBytes(self, forced);
+    if (std.mem.eql(u8, mode, "flat")) return false;
+    if (std.mem.eql(u8, mode, "recursive") or std.mem.eql(u8, mode, "nar")) return true;
+    const message = try std.fmt.allocPrint(self.allocator, "invalid value '{s}' for 'outputHashMode' attribute", .{mode});
+    defer self.allocator.free(message);
+    try vm_trace.setErrorMessage(self, message);
+    return error.InvalidHashMode;
+}
+
+/// Nix's `newHashAllowEmpty`: an empty hash is all zeros, with a warning.
+fn fixedOutputHash(self: *VM, text: []const u8, algorithm: ?nix_hash.Algorithm) !nix_hash.Digest {
+    if (text.len == 0) {
+        const algo = algorithm orelse return hashError(self, "empty hash requires explicit hash algorithm", .{});
+        const digest: nix_hash.Digest = .{ .algorithm = algo, .bytes = @splat(0) };
+        const sri = try nix_hash.format(self.allocator, digest, .sri);
+        defer self.allocator.free(sri);
+        const message = try std.fmt.allocPrint(self.allocator, "found empty hash, assuming '{s}'", .{sri});
+        defer self.allocator.free(message);
+        try errors.emitLanguageEffect(self, .warning, message);
+        return digest;
+    }
+    return nix_hash.parseAny(text, algorithm) catch |err| switch (err) {
+        error.UnknownHashAlgorithm => hashError(self, "unknown hash algorithm in '{s}', expect 'blake3', 'md5', 'sha1', 'sha256', or 'sha512'", .{text}),
+        error.HashAlgorithmMismatch => hashError(self, "hash '{s}' should have type '{s}'", .{ text, @tagName(algorithm.?) }),
+        error.MissingHashAlgorithm => hashError(self, "hash '{s}' does not include a type, nor is the type otherwise known from context", .{text}),
+        error.InvalidHash => hashError(self, "invalid hash '{s}'", .{text}),
+    };
+}
+
+fn hashError(self: *VM, comptime fmt: []const u8, args: anytype) anyerror {
+    const message = try std.fmt.allocPrint(self.allocator, fmt, args);
+    defer self.allocator.free(message);
+    try vm_trace.setErrorMessage(self, message);
+    return error.InvalidHash;
+}
+
+/// `outputHashAlgo`, which Nix reads with `parseHashAlgoOpt`: a name it
+/// doesn't know counts as no algorithm at all.
+fn fixedOutputHashAlgorithm(self: *VM, attrs_id: ObjectId) !?nix_hash.Algorithm {
+    const algo_value = (try self.heap.getAttrValueOpt(attrs_id, try self.intern.intern("outputHashAlgo"))) orelse return null;
+    const forced_algo = try vm_force.forceValue(self, algo_value);
+    if (forced_algo.isNull()) return null;
+    if (!isPlainString(forced_algo)) return error.TypeError;
+    const name = try vm_strings.stringBytes(self, forced_algo);
+    if (std.mem.eql(u8, name, "blake3")) return hashError(self, "experimental Nix feature 'blake3-hashes' is disabled", .{});
+    return std.meta.stringToEnum(nix_hash.Algorithm, name);
 }
 
 fn derivationIgnoreNulls(self: *VM, attrs_id: ObjectId) !bool {
@@ -645,22 +681,6 @@ fn derivationIgnoreNulls(self: *VM, attrs_id: ObjectId) !bool {
     const forced = try vm_force.forceValue(self, value);
     if (!forced.isBool()) return error.TypeError;
     return forced.asBool();
-}
-
-fn fixedOutputHashAlgorithm(self: *VM, attrs_id: ObjectId, hash_text: []const u8) ![]const u8 {
-    const algo_value = self.heap.getAttrValue(attrs_id, try self.intern.intern("outputHashAlgo")) catch |err| switch (err) {
-        error.MissingAttribute => Value.null_val,
-        else => return err,
-    };
-    const forced_algo = try vm_force.forceValue(self, algo_value);
-    if (isPlainString(forced_algo)) {
-        const algo = try vm_strings.stringBytes(self, forced_algo);
-        if (algo.len != 0) return algo;
-    } else if (!forced_algo.isNull()) return error.TypeError;
-
-    const separator = derivation.hashAlgorithmSeparator(hash_text) orelse return error.InvalidHashAlgorithm;
-    if (separator == 0) return error.InvalidHashAlgorithm;
-    return hash_text[0..separator];
 }
 
 fn derivationArgs(

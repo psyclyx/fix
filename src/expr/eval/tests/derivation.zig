@@ -285,7 +285,7 @@ test "evaluate minimal derivation builtins" {
     var missing_hash_algo_ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
     defer missing_hash_algo_ev.deinit();
     try std.testing.expectError(
-        error.InvalidHashAlgorithm,
+        error.InvalidHash,
         missing_hash_algo_ev.evaluate(
             \\(builtins.derivation {
             \\  name = "src";
@@ -531,6 +531,36 @@ test "a derivation's outputs are split at whitespace, as Nix does without struct
         error.StringContextNotAllowed,
         renderForTest(prefix ++ "outputs = [ \"${builtins.toFile \"c\" \"\"}\" ]; }; in d.drvPath"),
     );
+}
+
+test "a fixed-output hash is parsed as Nix's newHashAllowEmpty does" {
+    const prefix = "(builtins.derivation { name = \"a\"; system = \"x\"; builder = \"/b\"; ";
+    const cases = [_]struct { []const u8, []const u8 }{
+        // An empty hash is all zeros.
+        .{ "outputHash = \"\"; outputHashAlgo = \"sha256\"; }).drvPath", "\"/nix/store/x3q0fasrd4mzy94mjknrcxkn5zi4ysrp-a.drv\"" },
+        // `nar` is the new name of `recursive`.
+        .{ "outputHash = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"; outputHashMode = \"nar\"; }).outPath", "\"/nix/store/pkprgjg3irwr8bbfp4rfjvd1qbqpbpa4-a\"" },
+        .{ "outputHash = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"; outputHashMode = \"recursive\"; }).outPath", "\"/nix/store/pkprgjg3irwr8bbfp4rfjvd1qbqpbpa4-a\"" },
+        // An unknown `outputHashAlgo` is no algorithm.
+        .{ "outputHash = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"; outputHashAlgo = \"foo\"; }).drvPath", "\"/nix/store/fsyfvbv5s0qydx05q6lz94h4hf6aq061-a.drv\"" },
+    };
+    inline for (cases) |case| {
+        const got = try renderForTest(prefix ++ case[0]);
+        defer std.testing.allocator.free(got);
+        try std.testing.expectEqualStrings(case[1], got);
+    }
+    const invalid = [_][]const u8{
+        "outputHash = \"\"; }).drvPath",
+        "outputHash = \"foo-bar\"; }).drvPath",
+        "outputHash = \"/nix/store/wjgx25p2f76yd27x5glp7wl09bwxgf9j-c\"; }).drvPath",
+        "outputHash = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\"; }).drvPath",
+        "outputHash = \"sha1:s8l8ca4j8fb6d94205514xd6wf9b57ng\"; outputHashAlgo = \"sha256\"; }).drvPath",
+    };
+    inline for (invalid) |case| try std.testing.expectError(error.InvalidHash, renderForTest(prefix ++ case));
+    // The one output of a fixed-output derivation is `out`.
+    try std.testing.expectError(error.InvalidDerivationOutput, renderForTest(prefix ++ "outputHash = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"; outputs = [ \"bin\" ]; }).drvPath"));
+    // The mode is checked even without a hash.
+    try std.testing.expectError(error.InvalidHashMode, renderForTest(prefix ++ "outputHashMode = \"x\"; }).drvPath"));
 }
 
 test "derivation builtin rejects invalid hash mode and multi-output fixed hash" {
