@@ -17,6 +17,15 @@ const vm_trace = @import("../trace.zig");
 /// The attributes of a flake reference string. An indirect reference
 /// (`nixpkgs`) stays indirect: the registry resolves it when it's fetched.
 pub fn parse(self: *VM, arg: Value) !Value {
+    return parseRef(self, arg, false);
+}
+
+/// A flake input's reference, which may be a path relative to its flake.
+pub fn parseInput(self: *VM, arg: Value) !Value {
+    return parseRef(self, arg, true);
+}
+
+fn parseRef(self: *VM, arg: Value, input: bool) !Value {
     const value = try vm_force.forceValue(self, arg);
     if (!strings.isPlainString(value)) return vm_trace.typeErrorExpected(self, "a string", value);
     if (value.isContextString() and (try string_context.contextEntriesForValue(self, value)).len() != 0) {
@@ -28,7 +37,8 @@ pub fn parse(self: *VM, arg: Value) !Value {
     var arena = std.heap.ArenaAllocator.init(self.allocator);
     defer arena.deinit();
     var diagnostic: flakeref.Diagnostic = .{};
-    const attrs = flakeref.parse(arena.allocator(), &diagnostic, text) catch |err| return report(self, err, diagnostic);
+    const parse_fn = if (input) &flakeref.parseInput else &flakeref.parse;
+    const attrs = parse_fn(arena.allocator(), &diagnostic, text) catch |err| return report(self, err, diagnostic);
 
     var entries: std.ArrayListUnmanaged(heap_mod.AttrEntry) = .empty;
     defer entries.deinit(self.allocator);

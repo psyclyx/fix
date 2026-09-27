@@ -1772,3 +1772,149 @@ test "an override that makes a flake import itself is a circular import" {
     defer std.testing.allocator.free(src);
     try std.testing.expectError(error.CircularFlakeImport, ev.evaluate(src));
 }
+
+test "relative path inputs are part of their parent's source, as in Nix" {
+    var tr = std.testing.tmpDir(.{});
+    defer tr.cleanup();
+    const cwd = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+    const dir_r = try std.fs.path.resolve(std.testing.allocator, &.{ cwd, ".zig-cache", "tmp", &tr.sub_path });
+    defer std.testing.allocator.free(dir_r);
+
+    try tr.dir.writeFile(std.testing.io, .{ .sub_path = "flake.nix", .data =
+        \\{
+        \\  inputs.sub.url = "path:./sub";
+        \\  inputs.sub2.url = "./sub2";
+        \\  inputs.data = { url = "path:./data"; flake = false; };
+        \\  outputs = { self, sub, sub2, data }: {
+        \\    v = sub2.v;
+        \\    subOut = sub.outPath;
+        \\    dataOut = data.outPath;
+        \\    sameSource = sub.narHash == self.narHash && data.sourceInfo.narHash == self.narHash;
+        \\  };
+        \\}
+    });
+    try tr.dir.createDirPath(std.testing.io, "sub");
+    try tr.dir.writeFile(std.testing.io, .{ .sub_path = "sub/flake.nix", .data = "{ outputs = _: { v = 1; }; }" });
+    try tr.dir.createDirPath(std.testing.io, "sub2");
+    try tr.dir.writeFile(std.testing.io, .{ .sub_path = "sub2/flake.nix", .data = "{ inputs.up.url = \"path:../sub\"; outputs = { up, ... }: { v = up.v + 1; }; }" });
+    try tr.dir.createDirPath(std.testing.io, "data");
+    try tr.dir.writeFile(std.testing.io, .{ .sub_path = "data/x", .data = "x" });
+
+    const flake = try std.fmt.allocPrint(std.testing.allocator, "(builtins.getFlake \"path:{s}\")", .{dir_r});
+    defer std.testing.allocator.free(flake);
+    // First with a lock computed in memory, then with the lock file written
+    // and read back. Nix gives them different values: a node of a lock it
+    // has just computed has only its tree's store path as `sourceInfo`, and
+    // a normalized `outPath`; one read from a lock file has its parent's
+    // `sourceInfo`, and the path as written.
+    for ([_]bool{ false, true }) |from_file| {
+        var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+        defer ev.deinit();
+        ev.setFileIo(std.testing.io);
+        ev.policy.flakes_enabled = true;
+        if (from_file) {
+            ev.policy.write_flake_lock = true; // as the CLI does
+            const lock_it = try std.fmt.allocPrint(std.testing.allocator, "{s}.v", .{flake});
+            defer std.testing.allocator.free(lock_it);
+            _ = try ev.evaluate(lock_it);
+        }
+
+        const v = try std.fmt.allocPrint(std.testing.allocator, "{s}.v", .{flake});
+        defer std.testing.allocator.free(v);
+        try std.testing.expectEqual(@as(i64, 2), (try ev.evaluate(v)).asInt());
+        const same = try std.fmt.allocPrint(std.testing.allocator, "{s}.sameSource", .{flake});
+        defer std.testing.allocator.free(same);
+        if (from_file) {
+            try std.testing.expect((try ev.evaluate(same)).asBool());
+        } else {
+            try std.testing.expectError(error.MissingAttribute, ev.evaluate(same));
+        }
+
+        const store_path = try sourceStorePath(&ev, dir_r);
+        defer std.testing.allocator.free(store_path);
+        const cases = [_][3][]const u8{ .{ "subOut", "/./sub", "/sub" }, .{ "dataOut", "/./data", "/data" } };
+        for (cases) |case| {
+            const expected = try std.mem.concat(std.testing.allocator, u8, &.{ store_path, if (from_file) case[1] else case[2] });
+            defer std.testing.allocator.free(expected);
+            const source = try std.fmt.allocPrint(std.testing.allocator, "{s}.{s}", .{ flake, case[0] });
+            defer std.testing.allocator.free(source);
+            try expectStringValue(&ev, expected, source);
+        }
+    }
+
+    const lock = try tr.dir.readFileAlloc(std.testing.io, "flake.lock", std.testing.allocator, .limited(1 << 20));
+    defer std.testing.allocator.free(lock);
+    try expectInLock(lock, "\"sub\":{\"locked\":{\"path\":\"./sub\",\"type\":\"path\"},\"original\":{\"path\":\"./sub\",\"type\":\"path\"},\"parent\":[]}");
+    try expectInLock(lock, "\"up\":{\"locked\":{\"path\":\"../sub\",\"type\":\"path\"},\"original\":{\"path\":\"../sub\",\"type\":\"path\"},\"parent\":[\"sub2\"]}");
+    try expectInLock(lock, "\"data\":{\"flake\":false,");
+}
+
+test "a flake in a subdirectory has that directory in its outPath" {
+    var tr = std.testing.tmpDir(.{});
+    defer tr.cleanup();
+    const cwd = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+    const dir_r = try std.fs.path.resolve(std.testing.allocator, &.{ cwd, ".zig-cache", "tmp", &tr.sub_path });
+    defer std.testing.allocator.free(dir_r);
+    try tr.dir.createDirPath(std.testing.io, "sub");
+    try tr.dir.writeFile(std.testing.io, .{ .sub_path = "sub/flake.nix", .data = "{ outputs = { self }: { o = self.outPath; s = self.sourceInfo.outPath; }; }" });
+
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    ev.setFileIo(std.testing.io);
+    ev.policy.flakes_enabled = true;
+    const store_path = try sourceStorePath(&ev, dir_r);
+    defer std.testing.allocator.free(store_path);
+    const with_dir = try std.mem.concat(std.testing.allocator, u8, &.{ store_path, "/sub" });
+    defer std.testing.allocator.free(with_dir);
+    const o = try std.fmt.allocPrint(std.testing.allocator, "(builtins.getFlake \"path:{s}?dir=sub\").o", .{dir_r});
+    defer std.testing.allocator.free(o);
+    try expectStringValue(&ev, with_dir, o);
+    const s = try std.fmt.allocPrint(std.testing.allocator, "(builtins.getFlake \"path:{s}?dir=sub\").s", .{dir_r});
+    defer std.testing.allocator.free(s);
+    try expectStringValue(&ev, store_path, s);
+}
+
+test "a git flake whose lock getFlake computed has no revision, as in Nix" {
+    // Nix doesn't write the lock it computes in `getFlake`, and evaluates
+    // the flake as dirty (`forceDirty`): no `rev`, `shortRev` or
+    // `revCount`. A flake that has nothing to lock keeps them.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "dep");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep/flake.nix", .data = "{ outputs = _: { }; }" });
+    const dep = try tmp.dir.realPathFileAlloc(std.testing.io, "dep", std.testing.allocator);
+    defer std.testing.allocator.free(dep);
+    for ([_]bool{ true, false }) |with_input| {
+        const name = if (with_input) "with" else "without";
+        try tmp.dir.createDirPath(std.testing.io, name);
+        const flake_nix = if (with_input)
+            try std.fmt.allocPrint(std.testing.allocator, "{{ inputs.dep.url = \"path:{s}\"; outputs = _: {{ }}; }}", .{dep})
+        else
+            try std.testing.allocator.dupe(u8, "{ outputs = _: { }; }");
+        defer std.testing.allocator.free(flake_nix);
+        const sub = try std.fmt.allocPrint(std.testing.allocator, "{s}/flake.nix", .{name});
+        defer std.testing.allocator.free(sub);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = sub, .data = flake_nix });
+        const repo = try tmp.dir.realPathFileAlloc(std.testing.io, name, std.testing.allocator);
+        defer std.testing.allocator.free(repo);
+        try git_transport.createTestCommit(std.testing.allocator, std.testing.io, repo, "one");
+
+        var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+        defer ev.deinit();
+        ev.setFileIo(std.testing.io);
+        ev.policy.flakes_enabled = true;
+        const source = try std.fmt.allocPrint(std.testing.allocator, "let f = builtins.getFlake \"git+file://{s}\"; in [ (f ? rev) (f ? revCount) (f.sourceInfo ? rev) (f ? narHash) ]", .{repo});
+        defer std.testing.allocator.free(source);
+        const got = try ev.forceValue(try ev.evaluate(source));
+        const list = try ev.heap.getList(got.asObjectId());
+        // A flake's `inputs` are the declared ones, without `self`.
+        const inputs = try std.fmt.allocPrint(std.testing.allocator, "(builtins.getFlake \"git+file://{s}\").inputs ? self", .{repo});
+        defer std.testing.allocator.free(inputs);
+        try std.testing.expect(!(try ev.evaluate(inputs)).asBool());
+        for (list, [_]bool{ !with_input, !with_input, !with_input, true }) |item, want| {
+            try std.testing.expectEqual(want, (try ev.forceValue(item)).asBool());
+        }
+    }
+}

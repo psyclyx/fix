@@ -157,6 +157,10 @@ pub const BuiltinId = enum(u16) {
     /// Arg: (repository url). See fetch.zig.
     shallow_rev_count = 115,
     convertHash = 116,
+    /// Internal: lazily resolve a relative `path:` flake input, which is part
+    /// of its parent's source. Args: ({ parent; path; dir? }, sub_inputs,
+    /// is_flake). See vm/builtins/flakes.zig.
+    resolve_relative_flake_node = 117,
 };
 
 /// Public spelling for an id, or null for an evaluator-internal continuation.
@@ -170,6 +174,7 @@ pub fn publicName(id: BuiltinId) ?[]const u8 {
         .mapValue,
         .constantValue,
         .resolve_flake_node,
+        .resolve_relative_flake_node,
         .compute_nar_hash,
         .pure_guarded,
         .shallow_rev_count,
@@ -420,6 +425,7 @@ pub fn arity(id: BuiltinId) u8 {
         .mapAttrValue,
         .zipAttrsValue,
         .resolve_flake_node,
+        .resolve_relative_flake_node,
         => 3,
     };
 }

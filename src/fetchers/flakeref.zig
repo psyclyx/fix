@@ -69,6 +69,9 @@ pub const Diagnostic = struct {
 const Ctx = struct {
     arena: std.mem.Allocator,
     diagnostic: *Diagnostic,
+    /// Nix's `preserveRelativePaths`: a flake input may be a path relative
+    /// to the flake it's declared in.
+    preserve_relative: bool = false,
 
     fn fail(ctx: Ctx, comptime fmt: []const u8, args: anytype) Error {
         ctx.diagnostic.message = try std.fmt.allocPrint(ctx.arena, fmt, args);
@@ -112,6 +115,16 @@ const Ctx = struct {
 /// base directory, so a path must be absolute, and no fragment.
 pub fn parse(arena: std.mem.Allocator, diagnostic: *Diagnostic, text: []const u8) Error!Attrs {
     const ctx: Ctx = .{ .arena = arena, .diagnostic = diagnostic };
+    const parsed = try parseWithFragment(ctx, text);
+    if (parsed.fragment.len != 0) return ctx.fail("unexpected fragment '{s}' in flake reference '{s}'", .{ parsed.fragment, text });
+    return parsed.attrs;
+}
+
+/// A flake input's reference (Nix's `parseFlakeRef` with
+/// `preserveRelativePaths`): like `parse`, but a path may be relative to the
+/// flake that declares the input.
+pub fn parseInput(arena: std.mem.Allocator, diagnostic: *Diagnostic, text: []const u8) Error!Attrs {
+    const ctx: Ctx = .{ .arena = arena, .diagnostic = diagnostic, .preserve_relative = true };
     const parsed = try parseWithFragment(ctx, text);
     if (parsed.fragment.len != 0) return ctx.fail("unexpected fragment '{s}' in flake reference '{s}'", .{ parsed.fragment, text });
     return parsed.attrs;
@@ -227,10 +240,11 @@ fn parsePath(ctx: Ctx, text: []const u8) Error!WithFragment {
         else => |e| return e,
     };
     const fragment = url_mod.percentDecode(ctx.arena, fragment_text) catch return ctx.fail("invalid URI parameter '{s}'", .{fragment_text});
-    if (!std.fs.path.isAbsolute(path)) return ctx.fail("flake reference '{s}' is not an absolute path", .{text});
+    const absolute = std.fs.path.isAbsolute(path);
+    if (!absolute and !ctx.preserve_relative) return ctx.fail("flake reference '{s}' is not an absolute path", .{text});
     return fromParsedUrl(ctx, .{
         .scheme = "path",
-        .authority = .{},
+        .authority = if (absolute) .{} else null,
         .path = try url_mod.pathToUrlPath(ctx.arena, path),
         .query = query,
         .fragment = fragment,
@@ -806,4 +820,16 @@ test "flakeRefToString checks attributes against their scheme" {
     var unknown: Attrs = .{};
     try unknown.put(a, "type", .{ .string = "nope" });
     try std.testing.expectError(error.InvalidFlakeRef, render(a, &diagnostic, unknown));
+}
+
+test "a flake input may be a path relative to its flake" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diagnostic: Diagnostic = .{};
+    for ([_][2][]const u8{ .{ "./sub", "./sub" }, .{ "../sub", "../sub" }, .{ "path:./sub", "./sub" }, .{ "/abs", "/abs" } }) |case| {
+        const attrs = try parseInput(arena.allocator(), &diagnostic, case[0]);
+        try std.testing.expectEqualStrings("path", attrs.get("type").?.string);
+        try std.testing.expectEqualStrings(case[1], attrs.get("path").?.string);
+    }
+    try std.testing.expectError(error.InvalidFlakeRef, parse(arena.allocator(), &diagnostic, "./sub"));
 }
