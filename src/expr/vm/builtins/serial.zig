@@ -656,7 +656,7 @@ pub fn builtinCompareVersions(self: *VM, left_arg: Value, right_arg: Value) !Val
     if (!isPlainString(left_value) or !isPlainString(right_value)) return error.TypeError;
     const left = try vm_strings.stringBytes(self, left_value);
     const right = try vm_strings.stringBytes(self, right_value);
-    return Value.int(try version.compareVersions(self.allocator, left, right));
+    return Value.int(version.compareVersions(left, right));
 }
 
 pub fn builtinSplitVersion(self: *VM, arg: Value) !Value {

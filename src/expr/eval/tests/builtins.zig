@@ -470,6 +470,26 @@ test "evaluate version parsing builtins" {
     try std.testing.expectEqualStrings("\"1.2pre3\"", drv);
 }
 
+test "version builtins keep punctuation and non-ASCII inside components" {
+    const split = try renderForTest("builtins.splitVersion \"1.a_b-é2\"");
+    defer std.testing.allocator.free(split);
+    try std.testing.expectEqualStrings("[ \"1\" \"a_b\" \"é\" \"2\" ]", split);
+
+    // 2^31 is past Nix's `int` component parse, so it is a word, and words
+    // sort before numbers.
+    const wide = try renderForTest("builtins.compareVersions \"0\" \"2147483648\"");
+    defer std.testing.allocator.free(wide);
+    try std.testing.expectEqualStrings("1", wide);
+
+    const trailing_dash = try renderForTest("builtins.parseDrvName \"a-\"");
+    defer std.testing.allocator.free(trailing_dash);
+    try std.testing.expectEqualStrings("{ name = \"a-\"; version = \"\"; }", trailing_dash);
+
+    const leading_dash = try renderForTest("builtins.parseDrvName \"-0\"");
+    defer std.testing.allocator.free(leading_dash);
+    try std.testing.expectEqualStrings("{ name = \"\"; version = \"0\"; }", leading_dash);
+}
+
 test "evaluate regex builtins" {
     const matched = try renderForTest("builtins.match \"(.*)e?abi.*\" \"gnueabihf\"");
     defer std.testing.allocator.free(matched);
