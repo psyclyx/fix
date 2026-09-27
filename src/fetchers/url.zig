@@ -373,6 +373,25 @@ fn ipvFutureChar(c: u8) bool {
     return isUnreserved(c) or isSubDelim(c) or c == ':';
 }
 
+/// The local path of a `file:` URL with an empty authority, `file:///x`
+/// or `file:/x`, as it's written (not percent-decoded); null for anything
+/// else.
+pub fn filePath(url: []const u8) ?[]const u8 {
+    if (std.mem.startsWith(u8, url, "file://")) {
+        const rest = url["file://".len..];
+        return if (std.mem.startsWith(u8, rest, "/")) rest else null;
+    }
+    if (std.mem.startsWith(u8, url, "file:/")) return url["file:".len..];
+    return null;
+}
+
+test "file URLs name local paths with or without an authority" {
+    try std.testing.expectEqualStrings("/a/b", filePath("file:///a/b").?);
+    try std.testing.expectEqualStrings("/a/b", filePath("file:/a/b").?);
+    try std.testing.expect(filePath("file://host/a") == null);
+    try std.testing.expect(filePath("https://a/b") == null);
+}
+
 /// Nix's `percentDecode`: every `%` must start two hex digits.
 pub fn percentDecode(allocator: std.mem.Allocator, text: []const u8) Error![]const u8 {
     if (std.mem.indexOfScalar(u8, text, '%') == null) return text;

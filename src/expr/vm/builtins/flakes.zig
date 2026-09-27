@@ -5,6 +5,7 @@ const VM = @import("../context.zig").VM;
 const Value = @import("runtime").value.Value;
 const heap_mod = @import("runtime").heap;
 const FetchService = @import("fetchers").FetchService;
+const url_mod = @import("fetchers").url;
 const derivation = @import("store").derivation;
 const path_ops = @import("runtime").paths;
 const flake_ref = @import("flake_ref.zig");
@@ -1142,7 +1143,7 @@ fn sourceLockPath(self: *VM, ref_attrs: Value, dir: ?[]const u8) !?[]u8 {
     else if (std.mem.eql(u8, type_value, "git")) git: {
         const url = (try optionalStringAttr(self, id, "url")) orelse break :git null;
         defer self.allocator.free(url);
-        const path = if (std.mem.startsWith(u8, url, "file://")) url["file://".len..] else if (std.fs.path.isAbsolute(url)) url else break :git null;
+        const path = if (std.fs.path.isAbsolute(url)) url else url_mod.filePath(url) orelse break :git null;
         break :git try self.allocator.dupe(u8, path);
     } else null;
     const root = source orelse return null;

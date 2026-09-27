@@ -13,6 +13,7 @@ const clock = @import("base").clock;
 const sync = @import("base").sync;
 const http_transport = @import("http_transport.zig");
 const git_transport = @import("git_transport.zig");
+const url_mod = @import("url.zig");
 const BlockingPool = @import("base").BlockingPool;
 const fetch_types = @import("fetch/types.zig");
 const fetch_config = @import("fetch/config.zig");
@@ -1332,8 +1333,7 @@ fn hostPathExists(io: std.Io, path: []const u8) !bool {
 
 fn localFetchPath(url: []const u8) ?[]const u8 {
     if (std.fs.path.isAbsolute(url)) return url;
-    if (std.mem.startsWith(u8, url, "file://")) return url["file://".len..];
-    return null;
+    return url_mod.filePath(url);
 }
 
 fn stripMercurialDirtySuffix(rev: []const u8) []const u8 {
