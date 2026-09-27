@@ -11,6 +11,7 @@ const InternId = types.InternId;
 const ObjectId = types.ObjectId;
 const heap_mod = @import("runtime").heap;
 const int_mod = @import("runtime").int;
+const numeric = @import("runtime").numeric;
 const source_paths = @import("store").realization.source_path;
 const string_context = @import("string_context.zig");
 const vm_force = @import("../force.zig");
@@ -343,9 +344,8 @@ pub fn coerceToStringValue(self: *VM, arg: Value) !Value {
             // Nix coerces a float with C++ `std::to_string` — fixed-point with
             // 6 fractional digits (`1.0` → "1.000000", `1.5e-6` → "0.000002"),
             // NOT the shortest `%g` form used to *print* a value.
-            var buf: [400]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d:.6}", .{value.asFloat()}) catch unreachable;
-            return vm_strings.makeUniqueString(self, s);
+            var buf: [numeric.to_string_max_len]u8 = undefined;
+            return vm_strings.makeUniqueString(self, numeric.formatToString(&buf, value.asFloat()));
         },
         .bool_false, .null => return Value.string(try self.intern.intern("")),
         .bool_true => return Value.string(try self.intern.intern("1")),
@@ -454,9 +454,8 @@ pub fn coerceDerivationStringValue(self: *VM, arg: Value) !Value {
             // Nix coerces a float with C++ `std::to_string` — fixed-point with
             // 6 fractional digits (`1.0` → "1.000000", `1.5e-6` → "0.000002"),
             // NOT the shortest `%g` form used to *print* a value.
-            var buf: [400]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d:.6}", .{value.asFloat()}) catch unreachable;
-            return vm_strings.makeUniqueString(self, s);
+            var buf: [numeric.to_string_max_len]u8 = undefined;
+            return vm_strings.makeUniqueString(self, numeric.formatToString(&buf, value.asFloat()));
         },
         .bool_false, .null => return Value.string(try self.intern.intern("")),
         .bool_true => return Value.string(try self.intern.intern("1")),
