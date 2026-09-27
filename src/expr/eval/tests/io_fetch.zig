@@ -27,6 +27,15 @@ fn testGitRepo(tmp: *std.testing.TmpDir) ![:0]u8 {
     return repo;
 }
 
+/// `needle` is in the lock file, ignoring whitespace (which the lock's
+/// strings here don't contain).
+fn expectInLock(lock: []const u8, needle: []const u8) !void {
+    var compact: std.ArrayListUnmanaged(u8) = .empty;
+    defer compact.deinit(std.testing.allocator);
+    for (lock) |c| if (!std.ascii.isWhitespace(c)) try compact.append(std.testing.allocator, c);
+    try std.testing.expect(std.mem.indexOf(u8, compact.items, needle) != null);
+}
+
 /// Evaluate `source` to a string (with or without context) and compare its
 /// text.
 fn expectStringValue(ev: *Engine, expected: []const u8, source: []const u8) !void {
@@ -1002,7 +1011,7 @@ test "getFlake generates, writes, and uses a flake.lock when none exists" {
     const lock = try t_root.dir.readFileAlloc(std.testing.io, "flake.lock", std.testing.allocator, .limited(1 << 20));
     defer std.testing.allocator.free(lock);
     try std.testing.expect(std.mem.indexOf(u8, lock, "\"version\": 7") != null);
-    try std.testing.expect(std.mem.indexOf(u8, lock, "\"sub\": [\"sub\"]") != null);
+    try expectInLock(lock, "\"sub\":[\"sub\"]");
     try std.testing.expect(std.mem.indexOf(u8, lock, "narHash") != null);
 }
 
@@ -1161,8 +1170,8 @@ test "child-declared follows lock relative to the declaring flake" {
 
     const lock = try tr.dir.readFileAlloc(std.testing.io, "flake.lock", std.testing.allocator, .limited(1 << 20));
     defer std.testing.allocator.free(lock);
-    try std.testing.expect(std.mem.indexOf(u8, lock, "\"alias\": [\"dep\",\"sub\"]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, lock, "\"me\": [\"dep\"]") != null);
+    try expectInLock(lock, "\"alias\":[\"dep\",\"sub\"]");
+    try expectInLock(lock, "\"me\":[\"dep\"]");
 }
 
 test "deep override chains thread through lock generation" {
@@ -1223,7 +1232,7 @@ test "deep override chains thread through lock generation" {
 
     const lock = try tr.dir.readFileAlloc(std.testing.io, "flake.lock", std.testing.allocator, .limited(1 << 20));
     defer std.testing.allocator.free(lock);
-    try std.testing.expect(std.mem.indexOf(u8, lock, "\"c\": [\"x\"]") != null);
+    try expectInLock(lock, "\"c\":[\"x\"]");
 }
 
 test "pure evaluation sandboxes env, out-of-tree reads, search paths, and unlocked fetches" {

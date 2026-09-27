@@ -556,8 +556,10 @@ fn appendFmt(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, comptim
     try out.appendSlice(alloc, s);
 }
 
-/// Serialize a `JVal` into `out`.
-fn writeLockJson(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, v: JVal) !void {
+/// Write `v` as nlohmann's `dump(2)` does, which is how Nix writes lock
+/// files: two-space indentation, object keys sorted, `[]`/`{}` when empty,
+/// strings escaped only as JSON requires.
+fn writeLockJson(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, v: JVal, depth: usize) !void {
     switch (v) {
         .string => |s| {
             try out.append(alloc, '"');
@@ -566,6 +568,10 @@ fn writeLockJson(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, v: 
                 '\\' => try out.appendSlice(alloc, "\\\\"),
                 '\n' => try out.appendSlice(alloc, "\\n"),
                 '\t' => try out.appendSlice(alloc, "\\t"),
+                '\r' => try out.appendSlice(alloc, "\\r"),
+                0x08 => try out.appendSlice(alloc, "\\b"),
+                0x0c => try out.appendSlice(alloc, "\\f"),
+                0...0x07, 0x0b, 0x0e...0x1f => try appendFmt(out, alloc, "\\u{x:0>4}", .{c}),
                 else => try out.append(alloc, c),
             };
             try out.append(alloc, '"');
@@ -573,28 +579,40 @@ fn writeLockJson(out: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator, v: 
         .integer => |n| try appendFmt(out, alloc, "{d}", .{n}),
         .boolean => |b| try out.appendSlice(alloc, if (b) "true" else "false"),
         .array => |arr| {
-            try out.append(alloc, '[');
+            if (arr.len == 0) return out.appendSlice(alloc, "[]");
+            try out.appendSlice(alloc, "[\n");
             for (arr, 0..) |item, i| {
-                if (i != 0) try out.append(alloc, ',');
-                try writeLockJson(out, alloc, item);
+                if (i != 0) try out.appendSlice(alloc, ",\n");
+                try out.appendNTimes(alloc, ' ', 2 * (depth + 1));
+                try writeLockJson(out, alloc, item, depth + 1);
             }
+            try out.append(alloc, '\n');
+            try out.appendNTimes(alloc, ' ', 2 * depth);
             try out.append(alloc, ']');
         },
         .object => |fields| {
-            try out.append(alloc, '{');
-            for (fields, 0..) |f, i| {
-                if (i != 0) try out.append(alloc, ',');
-                try writeLockJson(out, alloc, .{ .string = f.key });
-                try out.append(alloc, ':');
-                try writeLockJson(out, alloc, f.val);
+            if (fields.len == 0) return out.appendSlice(alloc, "{}");
+            const sorted = try alloc.dupe(JField, fields);
+            std.mem.sort(JField, sorted, {}, struct {
+                fn lessThan(_: void, x: JField, y: JField) bool {
+                    return std.mem.lessThan(u8, x.key, y.key);
+                }
+            }.lessThan);
+            try out.appendSlice(alloc, "{\n");
+            for (sorted, 0..) |f, i| {
+                if (i != 0) try out.appendSlice(alloc, ",\n");
+                try out.appendNTimes(alloc, ' ', 2 * (depth + 1));
+                try writeLockJson(out, alloc, .{ .string = f.key }, depth + 1);
+                try out.appendSlice(alloc, ": ");
+                try writeLockJson(out, alloc, f.val, depth + 1);
             }
+            try out.append(alloc, '\n');
+            try out.appendNTimes(alloc, ' ', 2 * depth);
             try out.append(alloc, '}');
         },
     }
 }
 
-/// A forced ref attrset's scalar fields as a JSON object (arena-owned, in attr
-/// order).
 fn refAttrsToFields(gen: *LockGen, ref_attrs: Value) !std.ArrayListUnmanaged(JField) {
     var fields: std.ArrayListUnmanaged(JField) = .empty;
     if (ref_attrs.isAttrs()) {
@@ -895,49 +913,79 @@ fn lockFlakeInputs(gen: *LockGen, flake_value: Value, prefix: []const []const u8
 }
 
 /// Serialize the resolved graph as a Nix version-7 `flake.lock` (arena-owned).
+/// The lock file, as Nix writes it (`LockFile::toJSON`): nodes are named
+/// walking the graph depth-first from the root, each node's inputs in name
+/// order, after the input that reaches a node first (`a_2`, `a_3`, … when
+/// that name is taken); a node nothing reaches is left out.
 fn serializeLock(gen: *LockGen, root_edges: []const LockEdge) ![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
     const a = gen.arena;
-    try out.appendSlice(a, "{\n  \"nodes\": {\n    \"root\": {");
-    try writeEdges(gen, &out, root_edges, "      ", false);
-    try out.appendSlice(a, "\n    }");
-    for (gen.nodes.items) |node| {
-        try out.appendSlice(a, ",\n    ");
-        try writeLockJson(&out, a, .{ .string = node.key });
-        try out.appendSlice(a, ": {\n      \"locked\": ");
-        try writeLockJson(&out, a, node.locked);
-        try out.appendSlice(a, ",\n      \"original\": ");
-        try writeLockJson(&out, a, node.original);
-        if (!node.is_flake) try out.appendSlice(a, ",\n      \"flake\": false");
-        try writeEdges(gen, &out, node.inputs, "      ", true);
-        try out.appendSlice(a, "\n    }");
-    }
-    try out.appendSlice(a, "\n  },\n  \"root\": \"root\",\n  \"version\": 7\n}\n");
+    var namer: LockNamer = .{ .gen = gen };
+    for (gen.nodes.items, 0..) |node, i| try namer.by_id.put(a, node.key, i);
+    try namer.taken.put(a, "root", {});
+    const root_inputs = try namer.edgesJson(root_edges);
+    const root_fields: []const JField = if (root_inputs.len == 0) &.{} else try a.dupe(JField, &.{.{ .key = "inputs", .val = .{ .object = root_inputs } }});
+    try namer.nodes.append(a, .{ .key = "root", .val = .{ .object = root_fields } });
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    try writeLockJson(&out, a, .{ .object = &.{
+        .{ .key = "nodes", .val = .{ .object = namer.nodes.items } },
+        .{ .key = "root", .val = .{ .string = "root" } },
+        .{ .key = "version", .val = .{ .integer = 7 } },
+    } }, 0);
+    try out.append(a, '\n');
     return out.items;
 }
 
-fn writeEdges(gen: *LockGen, out: *std.ArrayListUnmanaged(u8), edges: []const LockEdge, indent: []const u8, leading_comma: bool) !void {
-    if (edges.len == 0) return;
-    const a = gen.arena;
-    if (leading_comma) try out.append(a, ',');
-    try appendFmt(out, a, "\n{s}\"inputs\": {{", .{indent});
-    for (edges, 0..) |edge, i| {
-        if (i != 0) try out.append(a, ',');
-        try appendFmt(out, a, "\n{s}  ", .{indent});
-        try writeLockJson(out, a, .{ .string = edge.name });
-        try out.appendSlice(a, ": ");
-        if (edge.follows) |path| {
-            var arr: std.ArrayListUnmanaged(JVal) = .empty;
-            for (path) |seg| try arr.append(a, .{ .string = seg });
-            try writeLockJson(out, a, .{ .array = arr.items });
-        } else {
-            try writeLockJson(out, a, .{ .string = edge.node_key.? });
-        }
-    }
-    try appendFmt(out, a, "\n{s}}}", .{indent});
-}
+const LockNamer = struct {
+    gen: *LockGen,
+    /// A node's id (`LockNode.key`) to its index in `gen.nodes`.
+    by_id: std.StringHashMapUnmanaged(usize) = .empty,
+    taken: std.StringHashMapUnmanaged(void) = .empty,
+    /// A node's id to its name in the file.
+    names: std.StringHashMapUnmanaged([]const u8) = .empty,
+    nodes: std.ArrayListUnmanaged(JField) = .empty,
 
-/// `<out_path>[/dir]/flake.lock`, owned by `self.allocator`.
+    fn edgesJson(self: *LockNamer, edges: []const LockEdge) anyerror![]const JField {
+        const a = self.gen.arena;
+        const sorted = try a.dupe(LockEdge, edges);
+        std.mem.sort(LockEdge, sorted, {}, struct {
+            fn lessThan(_: void, x: LockEdge, y: LockEdge) bool {
+                return std.mem.lessThan(u8, x.name, y.name);
+            }
+        }.lessThan);
+        const fields = try a.alloc(JField, sorted.len);
+        for (sorted, fields) |edge, *field| {
+            field.* = .{ .key = edge.name, .val = if (edge.follows) |path| follows: {
+                const segments = try a.alloc(JVal, path.len);
+                for (path, segments) |segment, *v| v.* = .{ .string = segment };
+                break :follows .{ .array = segments };
+            } else .{ .string = try self.name(edge.node_key.?, edge.name) } };
+        }
+        return fields;
+    }
+
+    /// Name the node `id` (reached as input `input`) and its descendants.
+    fn name(self: *LockNamer, id: []const u8, input: []const u8) anyerror![]const u8 {
+        if (self.names.get(id)) |existing| return existing;
+        const a = self.gen.arena;
+        var key = input;
+        var n: usize = 2;
+        while (self.taken.contains(key)) : (n += 1) key = try std.fmt.allocPrint(a, "{s}_{d}", .{ input, n });
+        try self.taken.put(a, key, {});
+        try self.names.put(a, id, key);
+
+        const node = self.gen.nodes.items[self.by_id.get(id).?];
+        var fields: std.ArrayListUnmanaged(JField) = .empty;
+        if (!node.is_flake) try fields.append(a, .{ .key = "flake", .val = .{ .boolean = false } });
+        const inputs = try self.edgesJson(node.inputs);
+        if (inputs.len != 0) try fields.append(a, .{ .key = "inputs", .val = .{ .object = inputs } });
+        try fields.append(a, .{ .key = "locked", .val = node.locked });
+        try fields.append(a, .{ .key = "original", .val = node.original });
+        try self.nodes.append(a, .{ .key = key, .val = .{ .object = fields.items } });
+        return key;
+    }
+};
+
 fn flakeLockPath(self: *VM, out_path: []const u8, dir: ?[]const u8) ![]u8 {
     return if (dir) |d|
         std.fs.path.join(self.allocator, &.{ out_path, d, "flake.lock" })
@@ -1346,4 +1394,90 @@ fn flakeResultValue(self: *VM, source_info: Value, inputs: Value, outputs: Value
         }
     }
     return Value.attrs(try self.heap.addAttrs(entries.items));
+}
+
+test "lock files name nodes depth-first in input order and print like Nix" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ref: JVal = .{ .object = &.{ .{ .key = "type", .val = .{ .string = "path" } }, .{ .key = "path", .val = .{ .string = "/a" } } } };
+    // Created in lock-computation order: c (and its `a`), then b (and its
+    // `a`), then a `flake = false` input; the root's `a` follows `c`.
+    var gen = LockGen{ .vm = undefined, .arena = a };
+    try gen.nodes.appendSlice(a, &.{
+        .{ .key = "c", .locked = ref, .original = ref, .is_flake = true, .inputs = &.{.{ .name = "a", .node_key = "a" }} },
+        .{ .key = "a", .locked = ref, .original = ref, .is_flake = true },
+        .{ .key = "b", .locked = ref, .original = ref, .is_flake = true, .inputs = &.{.{ .name = "a", .node_key = "a_2" }} },
+        .{ .key = "a_2", .locked = ref, .original = ref, .is_flake = true },
+        .{ .key = "x", .locked = ref, .original = ref, .is_flake = false },
+        .{ .key = "unreachable", .locked = ref, .original = ref, .is_flake = true },
+    });
+    const lock = try serializeLock(&gen, &.{
+        .{ .name = "c", .node_key = "c" },
+        .{ .name = "b", .node_key = "b" },
+        .{ .name = "a", .follows = &.{"c"} },
+        .{ .name = "x", .node_key = "x" },
+    });
+    // b is reached first, so its `a` is `a`, and c's is `a_2`.
+    const node =
+        \\      "locked": {
+        \\        "path": "/a",
+        \\        "type": "path"
+        \\      },
+        \\      "original": {
+        \\        "path": "/a",
+        \\        "type": "path"
+        \\      }
+    ;
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  "nodes": {
+        \\    "a": {
+        \\
+    ++ node ++
+        \\
+        \\    },
+        \\    "a_2": {
+        \\
+    ++ node ++
+        \\
+        \\    },
+        \\    "b": {
+        \\      "inputs": {
+        \\        "a": "a"
+        \\      },
+        \\
+    ++ node ++
+        \\
+        \\    },
+        \\    "c": {
+        \\      "inputs": {
+        \\        "a": "a_2"
+        \\      },
+        \\
+    ++ node ++
+        \\
+        \\    },
+        \\    "root": {
+        \\      "inputs": {
+        \\        "a": [
+        \\          "c"
+        \\        ],
+        \\        "b": "b",
+        \\        "c": "c",
+        \\        "x": "x"
+        \\      }
+        \\    },
+        \\    "x": {
+        \\      "flake": false,
+        \\
+    ++ node ++
+        \\
+        \\    }
+        \\  },
+        \\  "root": "root",
+        \\  "version": 7
+        \\}
+        \\
+    , lock);
 }
