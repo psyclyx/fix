@@ -63,3 +63,21 @@ test "appendContext rejects a non-attrs context argument" {
     defer ev.deinit();
     try std.testing.expectError(error.TypeError, ev.evaluate("builtins.appendContext \"x\" 1"));
 }
+
+test "a string with context orders against a plain string" {
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+
+    const prelude =
+        \\let d = builtins.derivation { name = "pkg"; system = "x86_64-linux"; builder = "/bin/sh"; };
+        \\    s = "${d}";
+        \\in
+    ;
+    try std.testing.expect((try ev.evaluate(prelude ++ " s < \"z\"")).asBool());
+    try std.testing.expect(!(try ev.evaluate(prelude ++ " \"z\" < s")).asBool());
+    try std.testing.expect((try ev.evaluate(prelude ++ " builtins.lessThan \"/\" s")).asBool());
+    try std.testing.expect((try ev.evaluate(prelude ++ " [ s ] < [ \"z\" ]")).asBool());
+    try std.testing.expect((try ev.evaluate(prelude ++ " builtins.head (builtins.sort builtins.lessThan [ \"z\" s ]) == s")).asBool());
+    // A path still only orders against a path.
+    try std.testing.expectError(error.TypeError, ev.evaluate(prelude ++ " s < /z"));
+}
