@@ -429,6 +429,30 @@ test "derivation builtin rejects missing required attrs" {
         error.MissingAttribute,
         renderForTest("(builtins.derivation { name = \"pkg\"; system = \"x86_64-linux\"; }).outPath"),
     );
+    // Empty is missing, as in Nix.
+    try std.testing.expectError(
+        error.MissingAttribute,
+        renderForTest("(builtins.derivation { name = \"pkg\"; system = \"\"; builder = \"/bin/sh\"; }).drvPath"),
+    );
+    try std.testing.expectError(
+        error.MissingAttribute,
+        renderForTest("(builtins.derivation { name = \"pkg\"; system = \"x86_64-linux\"; builder = \"\"; }).drvPath"),
+    );
+}
+
+test "a derivation name must leave room for the .drv file's" {
+    const longest = "a" ** 207;
+    const ok = try renderForTest("builtins.stringLength (builtins.derivation { name = \"" ++ longest ++ "\"; system = \"x\"; builder = \"/b\"; }).drvPath");
+    defer std.testing.allocator.free(ok);
+    try std.testing.expectEqualStrings("255", ok);
+    try std.testing.expectError(
+        error.InvalidDerivationName,
+        renderForTest("(builtins.derivation { name = \"" ++ longest ++ "a\"; system = \"x\"; builder = \"/b\"; }).drvPath"),
+    );
+    try std.testing.expectError(
+        error.InvalidDerivationName,
+        renderForTest("(builtins.derivation { name = \"a.drv\"; system = \"x\"; builder = \"/b\"; }).drvPath"),
+    );
 }
 
 test "derivation builtin rejects wrong-typed required attrs" {

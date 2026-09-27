@@ -239,11 +239,20 @@ fn derivationStructuredAttrs(self: *VM, attrs_id: ObjectId) !bool {
 
 /// Validate a derivation `name` as a Nix store-path name: non-empty, at most
 /// 211 chars, not `.`/`..`, and only `[A-Za-z0-9+._?=-]`.
+/// The name must be valid in the store, and so must its `.drv` file's
+/// (`<name>.drv`, so at most 207 bytes). Nix only lets text-hashed
+/// derivations, which fix doesn't support, have a name ending in `.drv`.
 fn validateDerivationName(self: *VM, name: []const u8) !void {
-    if (derivation.store_name.isValid(name)) return;
-    const msg = try std.fmt.allocPrint(self.allocator, "invalid derivation name '{s}'", .{name});
-    defer self.allocator.free(msg);
-    try vm_trace.setErrorMessage(self, msg);
+    var drv_name_buf: [256]u8 = undefined;
+    const drv_name = std.fmt.bufPrint(&drv_name_buf, "{s}.drv", .{name}) catch "";
+    const message = if (!derivation.store_name.isValid(name) or !derivation.store_name.isValid(drv_name))
+        try std.fmt.allocPrint(self.allocator, "invalid derivation name '{s}'", .{name})
+    else if (std.mem.endsWith(u8, name, ".drv"))
+        try std.fmt.allocPrint(self.allocator, "derivation names are allowed to end in '.drv' only if they produce a single derivation file", .{})
+    else
+        return;
+    defer self.allocator.free(message);
+    try vm_trace.setErrorMessage(self, message);
     return error.InvalidDerivationName;
 }
 
@@ -652,6 +661,7 @@ fn derivationArgs(
     return args;
 }
 
+/// `builder` or `system`: missing and empty are the same to Nix.
 fn requiredDerivationString(
     self: *VM,
     attrs_id: ObjectId,
@@ -659,7 +669,15 @@ fn requiredDerivationString(
     inputs: *DerivationInputs,
     owned_strings: *std.ArrayListUnmanaged([]u8),
 ) ![]const u8 {
-    return derivationAttrString(self, try self.heap.getAttrValue(attrs_id, try self.intern.intern(name)), inputs, owned_strings);
+    const text = derivationAttrString(self, try self.heap.getAttrValue(attrs_id, try self.intern.intern(name)), inputs, owned_strings) catch |err| switch (err) {
+        error.MissingAttribute => "",
+        else => return err,
+    };
+    if (text.len != 0) return text;
+    const message = try std.fmt.allocPrint(self.allocator, "required attribute '{s}' missing", .{name});
+    defer self.allocator.free(message);
+    try vm_trace.setErrorMessage(self, message);
+    return error.MissingAttribute;
 }
 
 fn derivationAttrString(
