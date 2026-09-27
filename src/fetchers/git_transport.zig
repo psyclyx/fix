@@ -341,7 +341,7 @@ fn copyTrackedWorktree(
                 try std.Io.Dir.cwd().createDirPath(io, parent);
                 var target_buffer: [std.fs.max_path_bytes]u8 = undefined;
                 const length = try std.Io.Dir.readLinkAbsolute(io, source, &target_buffer);
-                try std.Io.Dir.symLinkAbsolute(io, target_buffer[0..length], destination, .{});
+                try std.Io.Dir.cwd().symLink(io, target_buffer[0..length], destination, .{});
             },
             .file => try std.Io.Dir.copyFileAbsolute(source, destination, io, .{ .make_path = true }),
             else => {},
@@ -575,7 +575,7 @@ fn exportTree(
                 try std.Io.Dir.cwd().createDirPath(io, parent);
                 const link_target = repo.odb.readAlloc(allocator, entry.oid, max_symlink_target_len, diag) catch |err| return mapError(err);
                 defer allocator.free(link_target);
-                try std.Io.Dir.symLinkAbsolute(io, link_target, destination, .{});
+                try std.Io.Dir.cwd().symLink(io, link_target, destination, .{});
             },
             .gitlink => {
                 try std.Io.Dir.cwd().createDirPath(io, destination);
@@ -1254,4 +1254,36 @@ test "a local snapshot is dirty only when a tracked file changed" {
     defer testing.allocator.free(pinned_dest);
     const pinned = try snapshotLocal(testing.allocator, testing.io, source, pinned_dest, &clean.rev, false, false);
     try testing.expect(!pinned.dirty);
+}
+
+test "snapshots keep relative symlinks, in a work tree and at a pinned revision" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(testing.io, "source", .default_dir);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "source/file", .data = "one" });
+    try tmp.dir.symLink(testing.io, "file", "source/link", .{});
+    try tmp.dir.symLink(testing.io, "loop", "source/loop", .{});
+    const source = try tmp.dir.realPathFileAlloc(testing.io, "source", testing.allocator);
+    defer testing.allocator.free(source);
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    try createTestCommit(testing.allocator, testing.io, source, "one");
+
+    const worktree_dest = try std.fs.path.join(testing.allocator, &.{ root, "worktree" });
+    defer testing.allocator.free(worktree_dest);
+    const worktree = try snapshotLocal(testing.allocator, testing.io, source, worktree_dest, null, false, false);
+    const pinned_dest = try std.fs.path.join(testing.allocator, &.{ root, "pinned" });
+    defer testing.allocator.free(pinned_dest);
+    _ = try snapshotLocal(testing.allocator, testing.io, source, pinned_dest, &worktree.rev, false, false);
+
+    for ([_][]const u8{ "worktree", "pinned" }) |dest| {
+        for ([_][2][]const u8{ .{ "link", "file" }, .{ "loop", "loop" } }) |link| {
+            const link_path = try std.fs.path.join(testing.allocator, &.{ dest, link[0] });
+            defer testing.allocator.free(link_path);
+            var buffer: [std.fs.max_path_bytes]u8 = undefined;
+            const length = try tmp.dir.readLink(testing.io, link_path, &buffer);
+            try testing.expectEqualStrings(link[1], buffer[0..length]);
+        }
+    }
 }
