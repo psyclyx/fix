@@ -65,6 +65,9 @@ pub fn builtinDerivation(self: *VM, arg: Value, mode: DerivationMode) !Value {
 /// `buildLazyOutputValue`). `\x00` keeps it out of the user-visible
 /// attr namespace.
 const lazy_output_path_prefix = "\x00derivationOutputPath:";
+/// Internal thunk-name prefix: `<prefix><output>` is the `outPath` of a
+/// declared output the `.drv` doesn't have, which fails when forced.
+const missing_output_prefix = "\x00derivationMissingOutput:";
 
 pub fn builtinDerivationLazyAttr(self: *VM, attrs_arg: Value, name_arg: Value) !Value {
     const attrs = try vm_force.forceValue(self, attrs_arg);
@@ -74,6 +77,13 @@ pub fn builtinDerivationLazyAttr(self: *VM, attrs_arg: Value, name_arg: Value) !
     const name_id = try strings.stringNameId(self, name);
     const attrs_id = attrs.asObjectId();
     const name_text = self.intern.get(name_id);
+
+    if (std.mem.startsWith(u8, name_text, missing_output_prefix)) {
+        const message = try std.fmt.allocPrint(self.allocator, "attribute '{s}' missing", .{name_text[missing_output_prefix.len..]});
+        defer self.allocator.free(message);
+        try vm_trace.setErrorMessage(self, message);
+        return error.MissingAttribute;
+    }
 
     if (std.mem.startsWith(u8, name_text, lazy_output_path_prefix)) {
         const output_id = try self.intern.intern(name_text[lazy_output_path_prefix.len..]);
@@ -92,7 +102,7 @@ pub fn builtinDerivationLazyAttr(self: *VM, attrs_arg: Value, name_arg: Value) !
     // env attr throws, e.g. python packages disabled for the interpreter.)
     {
         const output_names = try derivationOutputNames(self, attrs_id);
-        defer self.allocator.free(output_names.names);
+        defer output_names.deinit(self.allocator);
         for (output_names.names) |output| {
             if (output == name_id) return buildLazyOutputValue(self, attrs_id, name_id, output_names);
         }
@@ -120,7 +130,7 @@ fn forcedDerivationValueCached(self: *VM, attrs_id: ObjectId) !Value {
 
 fn buildLazyDerivationValue(self: *VM, attrs_id: ObjectId) !Value {
     const output_names = try derivationOutputNames(self, attrs_id);
-    defer self.allocator.free(output_names.names);
+    defer output_names.deinit(self.allocator);
     return buildLazyValueForOutput(self, attrs_id, output_names.names[0], output_names, false);
 }
 
@@ -161,12 +171,6 @@ fn buildLazyValueForOutput(
         .name = try self.intern.intern("outputName"),
         .value = Value.string(selected),
     });
-    if (output_names.explicit) {
-        try entries.append(self.allocator, .{
-            .name = try self.intern.intern("outputs"),
-            .value = Value.list(try lazyOutputNamesList(self, output_names.names)),
-        });
-    }
     try entries.append(self.allocator, .{
         .name = try self.intern.intern("drvAttrs"),
         .value = Value.attrs(try self.heap.addAttrsView(original_attrs)),
@@ -195,13 +199,6 @@ fn buildLazyValueForOutput(
     try appendLazyDerivationAttr(self, &entries, attrs_id, "all");
 
     return Value.attrs(try self.heap.addAttrs(entries.items));
-}
-
-fn lazyOutputNamesList(self: *VM, names: []const InternId) !ObjectId {
-    const values = try self.allocator.alloc(Value, names.len);
-    defer self.allocator.free(values);
-    for (names, values) |name, *value| value.* = Value.string(name);
-    return self.heap.addList(values);
 }
 
 fn appendLazyDerivationAttr(
@@ -291,10 +288,15 @@ fn buildForcedDerivationValue(self: *VM, attrs_id: ObjectId, mode: DerivationMod
 
 const DerivationHeader = struct {
     name: []const u8,
+    /// The outputs as declared, which name the derivation value's
+    /// attributes.
     outputs: DerivationOutputNames,
+    /// The `.drv`'s outputs (see `drvOutputNames`).
+    drv_outputs: []InternId,
 
     fn deinit(self: *DerivationHeader, allocator: std.mem.Allocator) void {
-        allocator.free(self.outputs.names);
+        self.outputs.deinit(allocator);
+        allocator.free(self.drv_outputs);
     }
 };
 
@@ -307,9 +309,12 @@ fn readDerivationHeader(self: *VM, attrs_id: ObjectId) !DerivationHeader {
     const drv_name = self.intern.get(drv_name_id);
     try validateDerivationName(self, drv_name);
 
+    const outputs = try derivationOutputNames(self, attrs_id);
+    errdefer outputs.deinit(self.allocator);
     return .{
         .name = drv_name,
-        .outputs = try derivationOutputNames(self, attrs_id),
+        .outputs = outputs,
+        .drv_outputs = try drvOutputNames(self, attrs_id, drv_name, outputs),
     };
 }
 
@@ -329,7 +334,7 @@ const DerivationArtifact = struct {
 
 fn computeDerivationArtifact(self: *VM, attrs_id: ObjectId, header: DerivationHeader) !DerivationArtifact {
     const t_norm = prof.start(.drv_normalize);
-    var normalized = normalizeDerivation(self, attrs_id, header.name, header.outputs) catch |err| {
+    var normalized = normalizeDerivation(self, attrs_id, header.name, header.outputs, header.drv_outputs) catch |err| {
         prof.end(.drv_normalize, t_norm);
         return err;
     };
@@ -393,10 +398,26 @@ fn buildDerivationResult(
     // which instantiation won the demand-vs-speculation race decided the set —
     // burning builder time for no output.
 
-    const outputs = try self.allocator.alloc(derivation.ValueOutput, header.outputs.names.len);
+    // `derivationStrict` has the `.drv`'s outputs; `derivation` the declared
+    // ones, each of which must be one of those.
+    const names = switch (mode) {
+        .lazy => header.outputs.names,
+        .strict => header.drv_outputs,
+    };
+    const outputs = try self.allocator.alloc(derivation.ValueOutput, names.len);
     defer self.allocator.free(outputs);
-    for (header.outputs.names, outputs) |output_name, *output| {
-        const path = normalized.outputPath(self.intern.get(output_name)) orelse return error.InvalidDerivationOutput;
+    for (names, outputs) |output_name, *output| {
+        const path = normalized.outputPath(self.intern.get(output_name)) orelse {
+            // Nix's `derivation.nix` gives it an attribute anyway, whose
+            // `outPath` (`getAttr name strict`) fails when it's used.
+            const thunk_name = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ missing_output_prefix, self.intern.get(output_name) });
+            defer self.allocator.free(thunk_name);
+            const args = [_]Value{ Value.attrs(attrs_id), Value.string(try self.intern.intern(thunk_name)) };
+            const missing = try makeBuiltinThunk(self, .derivationLazyAttr, &args);
+            vm_force.rootKeep(self, missing);
+            output.* = .{ .name = output_name, .out_path = output_name, .missing = missing };
+            continue;
+        };
         output.* = .{
             .name = output_name,
             .out_path = try self.intern.intern(path),
@@ -405,10 +426,10 @@ fn buildDerivationResult(
 
     const spec: derivation.ValueSpec = .{
         .drv_path = try self.intern.intern(drv_path),
-        .default_output = header.outputs.names[0],
+        .default_output = names[0],
         .outputs = outputs,
-        .explicit_outputs = header.outputs.explicit,
         .original_attrs = try self.heap.materializeAttrs(attrs_id),
+        .declared = if (mode == .lazy) header.outputs.all else &.{},
     };
     const t_bv = prof.start(.drv_build_value);
     defer prof.end(.drv_build_value, t_bv);
@@ -447,7 +468,7 @@ const NormalizedDerivation = struct {
     }
 };
 
-fn normalizeDerivation(self: *VM, attrs_id: ObjectId, drv_name: []const u8, output_names: DerivationOutputNames) !NormalizedDerivation {
+fn normalizeDerivation(self: *VM, attrs_id: ObjectId, drv_name: []const u8, output_names: DerivationOutputNames, drv_outputs: []const InternId) !NormalizedDerivation {
     var owned_strings: std.ArrayListUnmanaged([]u8) = .empty;
     errdefer {
         for (owned_strings.items) |string| self.allocator.free(string);
@@ -468,9 +489,9 @@ fn normalizeDerivation(self: *VM, attrs_id: ObjectId, drv_name: []const u8, outp
     // (serial) normalize path. Only freshly-assembled strings are owned.
     const drv_name_owned = drv_name;
 
-    const outputs = try self.allocator.alloc(derivation.DrvOutput, output_names.names.len);
+    const outputs = try self.allocator.alloc(derivation.DrvOutput, drv_outputs.len);
     errdefer self.allocator.free(outputs);
-    for (output_names.names, outputs) |name, *output| {
+    for (drv_outputs, outputs) |name, *output| {
         output.* = .{ .name = self.intern.get(name) };
     }
 
@@ -516,10 +537,10 @@ fn normalizeDerivation(self: *VM, attrs_id: ObjectId, drv_name: []const u8, outp
             if (std.mem.eql(u8, attr_name, "args")) continue;
             if (std.mem.eql(u8, attr_name, "__ignoreNulls")) continue;
             if (ignore_nulls and (try vm_force.forceValue(self, entry_value)).isNull()) continue;
-            if (isDerivationOutputAttr(self, attr_name, output_names.names)) continue;
+            if (isDerivationOutputAttr(self, attr_name, drv_outputs)) continue;
             if (std.mem.eql(u8, attr_name, "outputs")) {
                 if (output_names.explicit) {
-                    const joined = try joinedOutputNames(self, output_names.names);
+                    const joined = try joinedOutputNames(self, output_names.all);
                     try owned_strings.append(self.allocator, joined);
                     try env.append(self.allocator, .{ .name = "outputs", .value = joined });
                 }
@@ -1045,8 +1066,19 @@ fn appendInputSrc(self: *VM, inputs: *DerivationInputs, path: []const u8) !void 
 }
 
 const DerivationOutputNames = struct {
+    /// The declared outputs without duplicates: the derivation value's
+    /// attributes (`derivation.nix` makes them with `listToAttrs`, where the
+    /// first of two equal names wins).
     names: []InternId,
+    /// The declared outputs as given, which the `.drv` has (see
+    /// `drvOutputNames`).
+    all: []InternId,
     explicit: bool,
+    buffer: []InternId,
+
+    fn deinit(self: DerivationOutputNames, allocator: std.mem.Allocator) void {
+        allocator.free(self.buffer);
+    }
 };
 
 fn derivationOutputNames(self: *VM, attrs_id: ObjectId) !DerivationOutputNames {
@@ -1055,7 +1087,7 @@ fn derivationOutputNames(self: *VM, attrs_id: ObjectId) !DerivationOutputNames {
         error.MissingAttribute => {
             const names = try self.allocator.alloc(InternId, 1);
             names[0] = try self.intern.intern("out");
-            return .{ .names = names, .explicit = false };
+            return .{ .names = names, .all = names, .explicit = false, .buffer = names };
         },
         else => return err,
     };
@@ -1072,23 +1104,74 @@ fn derivationOutputNames(self: *VM, attrs_id: ObjectId) !DerivationOutputNames {
     const items = try self.heap.getList(list_id);
     if (items.len == 0) return error.InvalidDerivationOutput;
 
-    const names = try self.allocator.alloc(InternId, items.len);
-    errdefer self.allocator.free(names);
-    for (names, 0..) |*name, i| {
+    const buffer = try self.allocator.alloc(InternId, 2 * items.len);
+    errdefer self.allocator.free(buffer);
+    const all = buffer[0..items.len];
+    var unique: usize = 0;
+    for (all, 0..) |*name, i| {
         const value = try vm_force.forceValue(self, try self.heap.getListItem(list_id, i));
         if (!isPlainString(value)) return error.TypeError;
+        // Nix's `derivation` makes them attribute names.
+        try vm_strings.rejectContext(self, value);
         name.* = try strings.stringNameId(self, value);
-        if (self.intern.get(name.*).len == 0) return error.InvalidDerivationOutput;
-    }
-    // Reject duplicate output names (Nix errors before building the .drv).
-    for (names, 0..) |n, i| {
-        for (names[0..i]) |m| {
-            if (n != m) continue;
-            const msg = try std.fmt.allocPrint(self.allocator, "duplicate derivation output '{s}'", .{self.intern.get(n)});
-            defer self.allocator.free(msg);
-            try vm_trace.setErrorMessage(self, msg);
-            return error.InvalidDerivationOutput;
+        if (std.mem.indexOfScalar(InternId, buffer[items.len..][0..unique], name.*) == null) {
+            buffer[items.len + unique] = name.*;
+            unique += 1;
         }
     }
-    return .{ .names = names, .explicit = true };
+    const names = buffer[items.len..][0..unique];
+    for (names) |name| {
+        if (std.mem.eql(u8, self.intern.get(name), "drvPath")) return invalidDrvPathOutput(self);
+    }
+    return .{ .names = names, .all = all, .explicit = true, .buffer = buffer };
+}
+
+fn invalidDrvPathOutput(self: *VM) anyerror {
+    try vm_trace.setErrorMessage(self, "invalid derivation output name 'drvPath'");
+    return error.InvalidDerivationOutput;
+}
+
+/// The `.drv`'s outputs. With structured attrs these are the declared
+/// ones; otherwise Nix coerces `outputs` to a string, as for the
+/// environment, and splits it at whitespace. The paths they name must be
+/// valid store paths.
+fn drvOutputNames(self: *VM, attrs_id: ObjectId, drv_name: []const u8, declared: DerivationOutputNames) ![]InternId {
+    var names: std.ArrayListUnmanaged(InternId) = .empty;
+    errdefer names.deinit(self.allocator);
+    const structured = try derivationStructuredAttrs(self, attrs_id);
+    for (declared.all) |name| {
+        if (structured) {
+            try names.append(self.allocator, name);
+            continue;
+        }
+        var tokens = std.mem.tokenizeAny(u8, self.intern.get(name), " \t\n\r");
+        while (tokens.next()) |token| try names.append(self.allocator, try self.intern.intern(token));
+    }
+    try rejectDuplicateOutputs(self, names.items);
+    for (names.items) |name| {
+        const output = self.intern.get(name);
+        if (std.mem.eql(u8, output, "drvPath")) return invalidDrvPathOutput(self);
+        const path_name = try derivation.outputPathName(self.allocator, drv_name, output);
+        defer self.allocator.free(path_name);
+        if (derivation.store_name.isValid(path_name)) continue;
+        const message = try std.fmt.allocPrint(self.allocator, "derivation output '{s}' gives the invalid store path name '{s}'", .{ output, path_name });
+        defer self.allocator.free(message);
+        try vm_trace.setErrorMessage(self, message);
+        return error.InvalidDerivationOutput;
+    }
+    if (names.items.len == 0) {
+        try vm_trace.setErrorMessage(self, "derivation cannot have an empty set of outputs");
+        return error.InvalidDerivationOutput;
+    }
+    return names.toOwnedSlice(self.allocator);
+}
+
+fn rejectDuplicateOutputs(self: *VM, names: []const InternId) !void {
+    for (names, 0..) |n, i| {
+        if (std.mem.indexOfScalar(InternId, names[0..i], n) == null) continue;
+        const msg = try std.fmt.allocPrint(self.allocator, "duplicate derivation output '{s}'", .{self.intern.get(n)});
+        defer self.allocator.free(msg);
+        try vm_trace.setErrorMessage(self, msg);
+        return error.InvalidDerivationOutput;
+    }
 }

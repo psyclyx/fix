@@ -497,6 +497,42 @@ test "derivation builtin rejects invalid outputs list" {
     );
 }
 
+test "a derivation's outputs are split at whitespace, as Nix does without structured attrs" {
+    const prefix = "let d = builtins.derivation { name = \"a\"; system = \"x\"; builder = \"/b\"; ";
+    // The .drv has outputs `x` and `y`; the value keeps the declared name.
+    const names = try renderForTest("builtins.attrNames (builtins.derivationStrict { name = \"a\"; system = \"x\"; builder = \"/b\"; outputs = [ \"x\\ty\" ]; })");
+    defer std.testing.allocator.free(names);
+    try std.testing.expectEqualStrings("[ \"drvPath\" \"x\" \"y\" ]", names);
+    try std.testing.expectError(error.MissingAttribute, renderForTest(prefix ++ "outputs = [ \"a b\" ]; }; in d.outPath"));
+    try std.testing.expectError(error.InvalidDerivationOutput, renderForTest(prefix ++ "outputs = [ \"a b\" \"a\" ]; }; in d.drvPath"));
+    // With structured attrs, a space is an invalid store path name.
+    try std.testing.expectError(error.InvalidDerivationOutput, renderForTest(prefix ++ "__structuredAttrs = true; outputs = [ \"a b\" ]; }; in d.drvPath"));
+    try std.testing.expectError(error.InvalidDerivationOutput, renderForTest(prefix ++ "outputs = [ \"\u{e9}\" ]; }; in d.drvPath"));
+    try std.testing.expectError(error.InvalidDerivationOutput, renderForTest(prefix ++ "outputs = [ \"drvPath\" ]; }; in d.drvPath"));
+    // Empty strings are no outputs; the value keeps the list it was given
+    // (and its first `out` attribute).
+    const empties = try renderForTest("builtins.attrNames (builtins.derivationStrict { name = \"a\"; system = \"x\"; builder = \"/b\"; outputs = [ \"out\" \"\" \"\" ]; })");
+    defer std.testing.allocator.free(empties);
+    try std.testing.expectEqualStrings("[ \"drvPath\" \"out\" ]", empties);
+    const given = try renderStrictForTest(prefix ++ "outputs = [ \"out\" \"\" \"\" ]; }; in [ d.outputs (map (x: x.outputName) d.all) ]");
+    defer std.testing.allocator.free(given);
+    try std.testing.expectEqualStrings("[ [ \"out\" \"\" \"\" ] [ \"out\" \"\" \"\" ] ]", given);
+    // A declared output the .drv doesn't have has an attribute, whose
+    // outPath fails only when it's used.
+    const unsplit = try renderStrictForTest(prefix ++ "outputs = [ \"a b\" ]; }; in [ d.type d.outputName (builtins.length d.all) ]");
+    defer std.testing.allocator.free(unsplit);
+    try std.testing.expectEqualStrings("[ \"derivation\" \"a b\" 1 ]", unsplit);
+    try std.testing.expectError(error.MissingAttribute, renderForTest(prefix ++ "outputs = [ \"a b\" ]; }; in d.outPath"));
+    const other = try renderForTest("builtins.stringLength (" ++ prefix ++ "outputs = [ \"\" \"out\" ]; }; in d.out.outPath)");
+    defer std.testing.allocator.free(other);
+    try std.testing.expectEqualStrings("45", other);
+    // Output names become attribute names, which can't refer to the store.
+    try std.testing.expectError(
+        error.StringContextNotAllowed,
+        renderForTest(prefix ++ "outputs = [ \"${builtins.toFile \"c\" \"\"}\" ]; }; in d.drvPath"),
+    );
+}
+
 test "derivation builtin rejects invalid hash mode and multi-output fixed hash" {
     try std.testing.expectError(
         error.InvalidHashMode,
