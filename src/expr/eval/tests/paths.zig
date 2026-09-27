@@ -124,3 +124,17 @@ test "toPath coerces like interpolation without copying, and canonicalizes" {
     }
     try std_testing.expectError(error.RelativePath, renderForTest("builtins.toPath \"a\""));
 }
+
+test "storePath wants a path in the store and depends on its store path" {
+    const got = try @import("../test_helpers.zig").renderStrictForTest(
+        \\let p = builtins.storePath { outPath = "/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d//bin/"; };
+        \\in [ p (builtins.getContext p) ]
+    );
+    defer std_testing.allocator.free(got);
+    try std_testing.expectEqualStrings(
+        "[ \"/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d/bin\" { \"/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d\" = { path = true; }; } ]",
+        got,
+    );
+    try std_testing.expectError(error.InvalidStorePath, renderForTest("builtins.storePath \"/nonexistent\""));
+    try std_testing.expectError(error.InvalidStorePath, renderForTest("builtins.storePath \"/nix/store\""));
+}

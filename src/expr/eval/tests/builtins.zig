@@ -727,7 +727,7 @@ test "evaluate path construction builtins" {
     const file_path = try std.fs.path.join(std.testing.allocator, &.{ cwd, "test/imported.nix" });
     defer std.testing.allocator.free(file_path);
 
-    const store_source = try std.fmt.allocPrint(std.testing.allocator, "builtins.isString (builtins.storePath \"{s}\")", .{cwd});
+    const store_source = try std.testing.allocator.dupe(u8, "builtins.isString (builtins.storePath \"/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d/bin\")");
     defer std.testing.allocator.free(store_source);
     const path_source = try std.fmt.allocPrint(std.testing.allocator, "builtins.isString (builtins.path {{ path = \"{s}\"; name = \"imported\"; }})", .{file_path});
     defer std.testing.allocator.free(path_source);
