@@ -7,11 +7,14 @@
 
 const std = @import("std");
 
-/// Valid iff: non-empty, at most 211 bytes, not `.` or `..`, and every byte is
-/// in `[A-Za-z0-9+._?=-]`. Pure — callers attach their own error/diagnostic.
+/// Valid iff: non-empty, at most 211 bytes, its first dash-separated
+/// component is not `.` or `..` (so `.-foo` and `..-foo` are out too), and
+/// every byte is in `[A-Za-z0-9+._?=-]`. Pure — callers attach their own
+/// error/diagnostic.
 pub fn isValid(name: []const u8) bool {
     if (name.len == 0 or name.len > 211) return false;
-    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
+    const first = name[0 .. std.mem.indexOfScalar(u8, name, '-') orelse name.len];
+    if (std.mem.eql(u8, first, ".") or std.mem.eql(u8, first, "..")) return false;
     for (name) |char| {
         if (std.ascii.isAlphanumeric(char)) continue;
         switch (char) {
@@ -29,6 +32,12 @@ test "isValid accepts and rejects per Nix checkName" {
     try t.expect(!isValid(""));
     try t.expect(!isValid("."));
     try t.expect(!isValid(".."));
+    try t.expect(!isValid(".-"));
+    try t.expect(!isValid(".-foo"));
+    try t.expect(!isValid("..-foo"));
+    try t.expect(isValid("...-foo"));
+    try t.expect(isValid(".foo"));
+    try t.expect(isValid("a-.-b"));
     try t.expect(!isValid("has/slash"));
     try t.expect(!isValid("has space"));
     // 211 bytes ok, 212 not.

@@ -162,6 +162,9 @@ test "evaluate string builtins" {
     try std.testing.expectEqualStrings("\"/nix/store/4g4g9i669dl63abpww0djbl2jxl6bwiz-x\"", to_file);
 
     try std.testing.expectError(error.InvalidStorePathName, renderForTest("builtins.toFile \"x y\" \"hello\""));
+    // `.` and `..` can't be the first dash-separated component either.
+    try std.testing.expectError(error.InvalidStorePathName, renderForTest("builtins.toFile \".-\" \"\""));
+    try std.testing.expectError(error.InvalidStorePathName, renderForTest("builtins.toFile \"..-x\" \"\""));
     try std.testing.expectError(
         error.DerivationReferenceInToFile,
         renderForTest(
