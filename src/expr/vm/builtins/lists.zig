@@ -551,8 +551,11 @@ pub fn builtinGenericClosure(self: *VM, arg: Value) !Value {
     if (!attrs.isAttrs()) return error.TypeError;
 
     const start_set = try vm_force.forceValue(self, try self.heap.getAttrValue(attrs.asObjectId(), try self.intern.intern("startSet")));
-    const operator = try vm_force.forceValue(self, try self.heap.getAttrValue(attrs.asObjectId(), try self.intern.intern("operator")));
     if (!start_set.isList()) return error.TypeError;
+    // As in Nix, the closure of nothing is the start set itself, and
+    // `operator` is neither looked up nor forced.
+    if (try self.heap.getListLen(start_set.asObjectId()) == 0) return start_set;
+    const operator = try vm_force.forceValue(self, try self.heap.getAttrValue(attrs.asObjectId(), try self.intern.intern("operator")));
 
     var result: std.ArrayListUnmanaged(Value) = .empty;
     defer result.deinit(self.allocator);

@@ -63,6 +63,16 @@ test "genericClosure keeps deduplicating equal keys" {
     );
 }
 
+test "genericClosure of an empty startSet is that list, without an operator" {
+    const empty = try renderStrictForTest("builtins.genericClosure { startSet = [ ]; }");
+    defer std.testing.allocator.free(empty);
+    try std.testing.expectEqualStrings("[ ]", empty);
+
+    const unused = try renderStrictForTest("builtins.genericClosure { startSet = [ ]; operator = throw \"unused\"; }");
+    defer std.testing.allocator.free(unused);
+    try std.testing.expectEqualStrings("[ ]", unused);
+}
+
 // Nix holds `genericClosure` keys in an ordered set, so a key that cannot be
 // ordered against the keys already there is an error rather than a distinct
 // entry — the dedup never gets to run. Two keys of the same unorderable type
