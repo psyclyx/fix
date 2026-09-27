@@ -99,3 +99,14 @@ test "placeholder hashes distinct output names to distinct values" {
     defer std_testing.allocator.free(out_again);
     try std_testing.expectEqualStrings(out, out_again);
 }
+
+test "a path literal may start with - or +" {
+    var ev = try Engine.init(std_testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    try ev.setBasePathToFileDir("/test/fold.nix");
+
+    // `f -./x` applies `f` to a path, as in Nix; it is not a subtraction.
+    const applied = try renderResolvedForTest(&ev, "let f = p: p; in [ (f -./x) (f +/y) (builtins.typeOf -/z) ]");
+    defer std_testing.allocator.free(applied);
+    try std_testing.expectEqualStrings("[ /test/-./x /test/+/y \"path\" ]", applied);
+}

@@ -134,6 +134,10 @@ pub const Scanner = struct {
         // segment follows). Bare `.devops` or `...` without a `/` segment
         // is not a path.
         if (c == '.' and self.looksLikeRelativePath()) return self.lexPath(start);
+        // `-` and `+` are path chars too, and maximal munch makes `-./x`,
+        // `-/x`, `+/x` and even `-1/2` path literals rather than an operator
+        // followed by a path or a division.
+        if ((c == '-' or c == '+') and self.looksLikeRelativePath()) return self.lexPath(start);
         // Leading-dot float: `.5`, `.5e3` (Nix's `0?\.[0-9]+` form). Deprecated
         // in Lix but still valid; `.` followed by a digit is never a selector
         // here because a bare `.` cannot start a select.
@@ -685,6 +689,25 @@ test "scanner: ellipsis is not a path unless a slash segment follows" {
     try std.testing.expectEqual(TokenType.path, p.next().type);
     try std.testing.expectEqual(TokenType.path, p.next().type);
     try std.testing.expectEqual(TokenType.eof, p.next().type);
+}
+
+// `-` and `+` are PATH_CHARs, so by maximal munch a path may start with them:
+// Nix parses `a -./x` as `a` applied to the path `-./x`, and `a -1/2` too.
+test "scanner lexes paths that start with - or +" {
+    var scanner = Scanner.init("-./x -/x +/x ++/x --/x -1/2 +1/x");
+    for ([_][]const u8{ "-./x", "-/x", "+/x", "++/x", "--/x", "-1/2", "+1/x" }) |want| {
+        const t = scanner.next();
+        try std.testing.expectEqual(TokenType.path, t.type);
+        try std.testing.expectEqualStrings(want, scanner.source[t.offset..][0..t.len]);
+    }
+    try std.testing.expectEqual(TokenType.eof, scanner.next().type);
+
+    // Without a `/` segment they stay operators.
+    var ops = Scanner.init("- -> + ++ -/*c*/ -//x");
+    for ([_]TokenType{ .minus, .arrow, .plus, .double_plus, .minus, .minus, .double_slash, .identifier }) |want| {
+        try std.testing.expectEqual(want, ops.next().type);
+    }
+    try std.testing.expectEqual(TokenType.eof, ops.next().type);
 }
 
 // A digit-leading first component is a normal PATH_CHAR run (`pathWith.nix`
