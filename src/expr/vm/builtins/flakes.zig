@@ -148,7 +148,7 @@ fn fetchTreeImpl(self: *VM, arg: Value, fetch_tree_defaults: bool) !Value {
         defer result.deinit(self.fetchers.allocator);
         const out = try ingestFetchedTree(self, result.path, spec.name, "", null);
         defer out.deinit(self.allocator);
-        return pathTreeValue(self, out.out_path, out.nar_hash, (try optionalIntAttr(self, attrs_id, "lastModified")) orelse 0);
+        return pathTreeValue(self, out.out_path, out.nar_hash, (try optionalIntAttr(self, attrs_id, "lastModified")) orelse result.last_modified);
     }
 
     if (std.mem.eql(u8, type_value, "git")) {

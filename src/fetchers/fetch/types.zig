@@ -80,6 +80,8 @@ pub const TarballResult = struct {
     path: []u8,
     nar_payload: ?TarballNar,
     forge_metadata: ?ForgeMetadata,
+    /// The newest mtime of the archive's entries (Nix's `lastModified`).
+    last_modified: i64 = 0,
     cached: bool = false,
 
     pub fn deinit(self: TarballResult, allocator: std.mem.Allocator) void {
