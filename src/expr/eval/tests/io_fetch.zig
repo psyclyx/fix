@@ -1722,3 +1722,27 @@ test "a locked input reads from its locked store path, else must match its narHa
         try std.testing.expectError(error.FlakeNarHashMismatch, ev.evaluate(src));
     }
 }
+
+test "a lock with a follows cycle or a follows to a missing input is rejected" {
+    for ([_][]const u8{
+        "{ inputs.a.follows = \"a\"; outputs = _: { }; }",
+        "{ inputs.a.follows = \"nope\"; outputs = _: { }; }",
+    }) |flake_nix| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "flake.nix", .data = flake_nix });
+        const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(dir);
+
+        var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+        defer ev.deinit();
+        ev.setFileIo(std.testing.io);
+        ev.policy.flakes_enabled = true;
+        ev.policy.write_flake_lock = true;
+        const src = try std.fmt.allocPrint(std.testing.allocator, "(builtins.getFlake \"path:{s}\").outputs", .{dir});
+        defer std.testing.allocator.free(src);
+        try std.testing.expectError(error.InvalidFlakeLock, ev.evaluate(src));
+        // Nor is it written.
+        try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "flake.lock", .{}));
+    }
+}

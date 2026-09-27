@@ -1033,6 +1033,7 @@ fn generateAndUseLock(self: *VM, flake_value: Value, ref_attrs: Value, dir: ?[]c
     defer arena_state.deinit();
     var gen = LockGen{ .vm = self, .arena = arena_state.allocator() };
     const lock_json = try serializeLock(&gen, try lockFlakeInputs(&gen, flake_value, &.{}, &.{}));
+    try checkLock(self, lock_json);
 
     // Persist next to the local flake.nix for the CLI, when writable (a
     // read-only tree is left alone — the in-memory lock is still used for
@@ -1101,6 +1102,7 @@ pub fn computeFlakeLock(self: *VM, ref: []const u8, update_all: bool, update_nam
     } else |_| {}
 
     const lock_json = try serializeLock(&gen, try lockFlakeInputs(&gen, flake_value, &.{}, &.{}));
+    try checkLock(self, lock_json);
     try self.files.writeFile(source_lock_path, lock_json);
 }
 
@@ -1162,6 +1164,35 @@ pub fn resolveFlakeNode(self: *VM, ref_attrs: Value, sub_inputs: Value, is_flake
 /// Resolve `input_target` (a node name string, or a `follows` path array from
 /// the root) to a concrete node name. `depth` guards a lock whose follows
 /// edges chain into a cycle without ever reaching a node.
+/// Nix's `LockFile::check` on a lock just computed: every `follows` leads to
+/// an input that exists, and doesn't go round in a cycle (`a.follows = "a"`).
+fn checkLock(self: *VM, lock_json: []const u8) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, lock_json, .{}) catch return error.InvalidFlakeLock;
+    defer parsed.deinit();
+    const nodes = parsed.value.object.get("nodes").?.object;
+    var node_it = nodes.iterator();
+    while (node_it.next()) |node| {
+        const inputs = node.value_ptr.object.get("inputs") orelse continue;
+        var input_it = inputs.object.iterator();
+        while (input_it.next()) |input| {
+            const target = input.value_ptr.*;
+            if (target != .array or target.array.items.len == 0) continue;
+            _ = followInput(nodes, "root", target, 0) catch {
+                var path: std.ArrayListUnmanaged(u8) = .empty;
+                defer path.deinit(self.allocator);
+                for (target.array.items, 0..) |segment, i| {
+                    if (i != 0) try path.append(self.allocator, '/');
+                    try path.appendSlice(self.allocator, if (segment == .string) segment.string else "?");
+                }
+                const message = try std.fmt.allocPrint(self.allocator, "input '{s}' of lock node '{s}' follows '{s}', a non-existent input or a follow cycle", .{ input.key_ptr.*, node.key_ptr.*, path.items });
+                defer self.allocator.free(message);
+                try vm_trace.setErrorMessage(self, message);
+                return error.InvalidFlakeLock;
+            };
+        }
+    }
+}
+
 fn followInput(nodes: std.json.ObjectMap, root_name: []const u8, input_target: std.json.Value, depth: u32) error{InvalidFlakeLock}![]const u8 {
     if (depth > 256) return error.InvalidFlakeLock;
     switch (input_target) {
