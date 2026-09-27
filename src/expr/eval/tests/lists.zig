@@ -148,3 +148,45 @@ test "foldl' on an empty list returns the seed without calling the operator" {
     defer std_testing.allocator.free(result);
     try std_testing.expectEqualStrings("5", result);
 }
+
+test "map, filter and sort return an empty list without forcing the function" {
+    const cases = [_][]const u8{
+        "builtins.map (throw \"f\") [ ]",
+        "builtins.filter (throw \"f\") [ ]",
+        "builtins.sort (throw \"f\") [ ]",
+        "builtins.map 1 [ ]",
+    };
+    for (cases) |case| {
+        const result = try renderForTest(case);
+        defer std_testing.allocator.free(result);
+        try std_testing.expectEqualStrings("[ ]", result);
+    }
+}
+
+test "list builtins force what Nix forces" {
+    // sort forces every element, even one it never compares.
+    try std_testing.expectError(error.NixThrow, renderForTest("builtins.seq (builtins.sort builtins.lessThan [ (throw \"x\") ]) 1"));
+    // partition forces each element before the predicate sees it.
+    try std_testing.expectError(error.NixThrow, renderForTest("builtins.seq (builtins.partition (x: true) [ (throw \"x\") ]) 1"));
+    // removeAttrs forces every name, even with nothing to remove.
+    try std_testing.expectError(error.NixThrow, renderForTest("builtins.removeAttrs { } [ (throw \"t\") ]"));
+    try std_testing.expectError(error.NixThrow, renderForTest("builtins.removeAttrs { a = 1; } [ \"a\" (throw \"t\") ]"));
+    // The function argument must be a function even when it's never called.
+    try std_testing.expectError(error.NotCallable, renderForTest("builtins.all 1 [ ]"));
+    try std_testing.expectError(error.NotCallable, renderForTest("builtins.any 1 [ ]"));
+    try std_testing.expectError(error.NotCallable, renderForTest("builtins.foldl' 1 0 [ ]"));
+    try std_testing.expectError(error.NotCallable, renderForTest("builtins.concatMap 1 [ ]"));
+    try std_testing.expectError(error.NotCallable, renderForTest("builtins.genList 1 0"));
+}
+
+test "foldl' of an empty list is the seed, forced" {
+    const applied = try renderForTest("builtins.foldl' (x: x) (let f = a: a; in f) [ ] 1");
+    defer std_testing.allocator.free(applied);
+    try std_testing.expectEqualStrings("1", applied);
+
+    try std_testing.expectError(error.NixThrow, renderForTest("builtins.seq (builtins.foldl' (x: y: x) (throw \"nul\") [ ]) 1"));
+    // With elements, the seed is only passed along.
+    const lazy_seed = try renderForTest("builtins.foldl' (x: y: y) (throw \"nul\") [ 1 ]");
+    defer std_testing.allocator.free(lazy_seed);
+    try std_testing.expectEqualStrings("1", lazy_seed);
+}
