@@ -1121,11 +1121,9 @@ fn buildNodeThunk(self: *VM, nodes: std.json.ObjectMap, node_name: []const u8, r
 
 /// Verify a fetched input's NAR hash against the lock, as Nix does — a mismatch
 /// means the locked content changed under the pin (corruption / tampering).
-/// Only under store writes, where fix computes the real NAR hash (plain eval
-/// uses an offline synthetic), and only for the tree types whose NAR hash is
-/// confirmed to match Nix (forges/tarball/path); git/mercurial/file are skipped.
+/// Only for the tree types whose NAR hash is confirmed to match Nix
+/// (forges/tarball/path/git); mercurial/file are skipped.
 fn verifyLockedNarHash(self: *VM, ref_attrs: Value, src_info: Value) !void {
-    if (!self.realization.storeWritesEnabled()) return;
     if (!ref_attrs.isAttrs()) return;
     const ty = (try optionalStringAttr(self, ref_attrs.asObjectId(), "type")) orelse return;
     defer self.allocator.free(ty);
@@ -1143,14 +1141,17 @@ fn verifyLockedNarHash(self: *VM, ref_attrs: Value, src_info: Value) !void {
     }
 }
 
-/// If store writes are enabled and this ref's narHash names a store path that is
-/// already valid, return the equivalent tree value directly — skipping the
-/// download + ingest. Fail-open: any miss (no narHash, unsupported type,
-/// unparseable hash, path not valid) returns null and the caller fetches.
-/// Reuses the same store-path scheme (`sourcePath`) and value constructors the
-/// real fetch would, so a skipped fetch is indistinguishable from a real one.
+/// If this ref's narHash names a store path that is already valid, return the
+/// equivalent tree value directly — skipping the download + ingest, as Nix
+/// does (so an input whose source has changed since it was locked, such as a
+/// flake's own directory once its lock file is written, still evaluates to
+/// the locked tree). Validity is the daemon's with store writes, else the
+/// path's presence in the local store. Fail-open: any miss (no narHash,
+/// unsupported type, unparseable hash, path not valid) returns null and the
+/// caller fetches. Reuses the same store-path scheme (`sourcePath`) and value
+/// constructors the real fetch would, so a skipped fetch is indistinguishable
+/// from a real one.
 fn flakeInputFromStore(self: *VM, attrs: Value) !?Value {
-    if (!self.realization.storeWritesEnabled()) return null;
     if (!attrs.isAttrs()) return null;
     const id = attrs.asObjectId();
     const nar_hash = (try optionalStringAttr(self, id, "narHash")) orelse return null;
@@ -1185,7 +1186,11 @@ fn flakeInputFromStore(self: *VM, attrs: Value) !?Value {
     defer self.allocator.free(hex);
     const store_path = try derivation.sourcePath(self.allocator, self.realization.store_dir, name, hex);
     defer self.allocator.free(store_path);
-    if (!try self.realization.pathIsValid(store_path)) return null;
+    const valid = if (self.realization.storeWritesEnabled())
+        try self.realization.pathIsValid(store_path)
+    else
+        try self.files.existsUncached(store_path);
+    if (!valid) return null;
 
     // No fetch happens here, so the locked `lastModified` pin is the only
     // timestamp source.

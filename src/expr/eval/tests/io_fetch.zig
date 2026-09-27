@@ -1630,3 +1630,78 @@ test "finishEvaluation releases retained flat recipe payload" {
         try std.testing.expectEqual(@as(usize, 1), tracking.freeCount());
     } else return error.MissingRecipeRegistryApi;
 }
+
+test "a locked input reads from its locked store path, else must match its narHash" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "store");
+    try tmp.dir.createDirPath(std.testing.io, "dep");
+    try tmp.dir.createDirPath(std.testing.io, "flake");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep/x", .data = "old" });
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    const store_dir = try std.fs.path.join(std.testing.allocator, &.{ root, "store" });
+    defer std.testing.allocator.free(store_dir);
+    const dep = try std.fs.path.join(std.testing.allocator, &.{ root, "dep" });
+    defer std.testing.allocator.free(dep);
+    const flake = try std.fs.path.join(std.testing.allocator, &.{ root, "flake" });
+    defer std.testing.allocator.free(flake);
+
+    const flake_nix = try std.fmt.allocPrint(std.testing.allocator, "{{ inputs.dep = {{ url = \"path:{s}\"; flake = false; }}; outputs = {{ dep, ... }}: {{ x = builtins.readFile \"${{dep}}/x\"; }}; }}", .{dep});
+    defer std.testing.allocator.free(flake_nix);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "flake/flake.nix", .data = flake_nix });
+
+    // Lock `dep` as it is now.
+    const locked = locked: {
+        var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+        defer ev.deinit();
+        ev.setFileIo(std.testing.io);
+        ev.store.realization.store_dir = store_dir;
+        ev.policy.fetch_tree_enabled = true;
+        const src = try std.fmt.allocPrint(std.testing.allocator, "let t = builtins.fetchTree {{ type = \"path\"; path = \"{s}\"; }}; in \"${{t.narHash}} ${{t.outPath}}\"", .{dep});
+        defer std.testing.allocator.free(src);
+        const value = try ev.forceValue(try ev.evaluate(src));
+        break :locked try std.testing.allocator.dupe(u8, ev.intern.get((try ev.heap.getContextString(value.asObjectId())).text));
+    };
+    defer std.testing.allocator.free(locked);
+    const space = std.mem.indexOfScalar(u8, locked, ' ').?;
+    const nar_hash = locked[0..space];
+    const store_path = locked[space + 1 ..];
+    const lock = try std.fmt.allocPrint(std.testing.allocator,
+        \\{{ "nodes": {{
+        \\  "root": {{ "inputs": {{ "dep": "dep" }} }},
+        \\  "dep": {{ "flake": false, "locked": {{ "type": "path", "path": "{s}", "narHash": "{s}" }}, "original": {{ "type": "path", "path": "{s}" }} }}
+        \\}}, "root": "root", "version": 7 }}
+    , .{ dep, nar_hash, dep });
+    defer std.testing.allocator.free(lock);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "flake/flake.lock", .data = lock });
+
+    // The locked tree is in the store; `dep` has changed since.
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, store_path);
+    const stored_x = try std.fs.path.join(std.testing.allocator, &.{ store_path, "x" });
+    defer std.testing.allocator.free(stored_x);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = stored_x, .data = "old" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep/x", .data = "new" });
+
+    const src = try std.fmt.allocPrint(std.testing.allocator, "(builtins.getFlake \"path:{s}\").x", .{flake});
+    defer std.testing.allocator.free(src);
+    {
+        var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+        defer ev.deinit();
+        ev.setFileIo(std.testing.io);
+        ev.store.realization.store_dir = store_dir;
+        ev.policy.flakes_enabled = true;
+        try expectStringValue(&ev, "old", src);
+    }
+
+    // Without it, the changed source doesn't match the lock.
+    try std.Io.Dir.cwd().deleteTree(std.testing.io, store_path);
+    {
+        var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+        defer ev.deinit();
+        ev.setFileIo(std.testing.io);
+        ev.store.realization.store_dir = store_dir;
+        ev.policy.flakes_enabled = true;
+        try std.testing.expectError(error.FlakeNarHashMismatch, ev.evaluate(src));
+    }
+}
