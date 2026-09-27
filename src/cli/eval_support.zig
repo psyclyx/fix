@@ -13,6 +13,7 @@ const Value = runtime.Value;
 const EvaluationMode = args.EvaluationMode;
 const SourceArg = args.SourceArg;
 const TextRef = @import("base").TextRef;
+const cli_flake_ref = @import("flake_ref.zig");
 
 /// The build realization mode selected by `--check`/`--repair` (`--check`
 /// takes precedence). `--repair`/`--check` require a trusted daemon user.
@@ -242,7 +243,7 @@ fn getSourceMode(ev: *Engine, io: std.Io, source: SourceArg, options: args.Sourc
         // it unset would leave `./foo.txt` unresolved rather than fall back.
         .expr => |text| .{ .text = .{ .borrowed = text }, .base_path = try fileish.dupBasePath(ev) },
         .file => |path| try fileish.load(ev, io, path),
-        .flake => |installable| .{ .text = .{ .owned = try lowerFlakeInstallable(ev, installable, options) } },
+        .flake => |installable| .{ .text = .{ .owned = try lowerFlakeInstallable(ev, io, installable, options) } },
     };
 
     // If selector wrapping fails, `base` (owned flake text and/or file
@@ -365,15 +366,14 @@ fn appendFlakeCandidate(alloc: std.mem.Allocator, out: *std.ArrayListUnmanaged(u
     try out.appendSlice(alloc, suffix);
 }
 
-fn lowerFlakeInstallable(ev: *Engine, installable: []const u8, options: args.SourceOptions) ![]u8 {
+fn lowerFlakeInstallable(ev: *Engine, io: std.Io, installable: []const u8, options: args.SourceOptions) ![]u8 {
     const alloc = ev.hostAllocator();
     const hash = std.mem.indexOfScalar(u8, installable, '#');
     const flake_ref = if (hash) |i| installable[0..i] else installable;
     const attr_path = if (hash) |i| installable[i + 1 ..] else "";
 
-    var resolved = try resolveFlakeRef(ev, flake_ref);
-    defer resolved.deinit(alloc);
-    const resolved_ref = resolved.slice();
+    const resolved_ref = try cli_flake_ref.resolve(alloc, io, ev.basePath(), flake_ref);
+    defer alloc.free(resolved_ref);
 
     // Flake installables evaluate in pure mode (Nix's default); `--impure` opts
     // out. A local-path flake's own source tree is readable besides the store.
@@ -434,11 +434,10 @@ fn lowerFlakeInstallable(ev: *Engine, installable: []const u8, options: args.Sou
 /// typed portion before the final dot. Non-attr branches are ignored so a
 /// similarly named leaf in one namespace cannot suppress useful candidates
 /// from another.
-pub fn lowerFlakeCompletion(ev: *Engine, flake_ref: []const u8, parent: []const u8) ![]const u8 {
+pub fn lowerFlakeCompletion(ev: *Engine, io: std.Io, flake_ref: []const u8, parent: []const u8) ![]const u8 {
     const alloc = ev.hostAllocator();
-    var resolved = try resolveFlakeRef(ev, flake_ref);
-    defer resolved.deinit(alloc);
-    const resolved_ref = resolved.slice();
+    const resolved_ref = try cli_flake_ref.resolve(alloc, io, ev.basePath(), flake_ref);
+    defer alloc.free(resolved_ref);
 
     var suffix: std.ArrayListUnmanaged(u8) = .empty;
     defer suffix.deinit(alloc);
@@ -463,22 +462,6 @@ pub fn lowerFlakeCompletion(ev: *Engine, flake_ref: []const u8, parent: []const 
         try out.appendSlice(alloc, " or {}))");
     }
     return out.toOwnedSlice(alloc);
-}
-
-const ResolvedRef = TextRef;
-
-/// Turn a CLI flakeref into one `builtins.getFlake` accepts. Only the
-/// CLI-specific bit lives here: `.` and paths (`/…`, `./…`, `../…`) resolve to
-/// an absolute path against the base path (the cwd). Everything else — scheme
-/// refs (`github:…`, `git+…`) and bare indirect ids (`nixpkgs`) — passes through
-/// to getFlake, which resolves indirect ids via the flake registry itself.
-fn resolveFlakeRef(ev: *Engine, flake_ref: []const u8) !ResolvedRef {
-    if (flake_ref.len > 0 and (flake_ref[0] == '/' or flake_ref[0] == '.')) {
-        const base = ev.basePath() orelse return .{ .borrowed = flake_ref };
-        const abs = try std.fs.path.resolve(ev.hostAllocator(), &.{ base, flake_ref });
-        return .{ .owned = abs };
-    }
-    return .{ .borrowed = flake_ref };
 }
 
 /// Append `."a"."b"` selections for the dotted `attr_path` to `out`, each
@@ -535,7 +518,7 @@ test "flake installable lowering: profiles, default attr, literal system" {
 
     // The system is injected as a string literal, never `builtins.currentSystem`
     // (which pure eval forbids).
-    const build_hello = try lowerFlakeInstallable(&ev, "github:o/r#hello", .{ .cmd = .build });
+    const build_hello = try lowerFlakeInstallable(&ev, std.testing.io, "github:o/r#hello", .{ .cmd = .build });
     defer alloc.free(build_hello);
     try std.testing.expect(std.mem.indexOf(u8, build_hello, "builtins.currentSystem") == null);
     try std.testing.expect(std.mem.indexOf(u8, build_hello, ev.systemName()) != null);
@@ -545,20 +528,20 @@ test "flake installable lowering: profiles, default attr, literal system" {
     try std.testing.expect(p_idx < root_idx);
 
     // eval resolves the attr path from the flake root first.
-    const eval_x = try lowerFlakeInstallable(&ev, "github:o/r#a.b", .{ .cmd = .eval });
+    const eval_x = try lowerFlakeInstallable(&ev, std.testing.io, "github:o/r#a.b", .{ .cmd = .eval });
     defer alloc.free(eval_x);
     try std.testing.expect(std.mem.indexOf(u8, eval_x, "in f.\"a\".\"b\" or f.packages.${s}") != null);
 
     // Empty fragment: default output for build, whole flake for eval.
-    const build_default = try lowerFlakeInstallable(&ev, "github:o/r", .{ .cmd = .build });
+    const build_default = try lowerFlakeInstallable(&ev, std.testing.io, "github:o/r", .{ .cmd = .build });
     defer alloc.free(build_default);
     try std.testing.expect(std.mem.indexOf(u8, build_default, "f.packages.${s}.\"default\"") != null);
-    const eval_whole = try lowerFlakeInstallable(&ev, "github:o/r", .{ .cmd = .eval });
+    const eval_whole = try lowerFlakeInstallable(&ev, std.testing.io, "github:o/r", .{ .cmd = .eval });
     defer alloc.free(eval_whole);
     try std.testing.expectEqualStrings("(builtins.getFlake \"github:o/r\")", eval_whole);
 
     // shell resolves devShells before packages.
-    const shell_x = try lowerFlakeInstallable(&ev, "github:o/r#dev", .{ .cmd = .shell });
+    const shell_x = try lowerFlakeInstallable(&ev, std.testing.io, "github:o/r#dev", .{ .cmd = .shell });
     defer alloc.free(shell_x);
     const dev_idx = std.mem.indexOf(u8, shell_x, "f.devShells.${s}").?;
     const pkg_idx = std.mem.indexOf(u8, shell_x, "f.packages.${s}").?;
