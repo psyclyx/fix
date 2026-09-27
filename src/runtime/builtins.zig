@@ -156,6 +156,7 @@ pub const BuiltinId = enum(u16) {
     /// passed, so the error surfaces only if `revCount` is used, as in Nix.
     /// Arg: (repository url). See fetch.zig.
     shallow_rev_count = 115,
+    convertHash = 116,
 };
 
 /// Public spelling for an id, or null for an evaluator-internal continuation.
@@ -363,6 +364,7 @@ pub fn arity(id: BuiltinId) u8 {
         .baseNameOf,
         .dirOf,
         .shallow_rev_count,
+        .convertHash,
         => 1,
         .hasAttr,
         .getAttr,

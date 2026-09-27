@@ -158,5 +158,6 @@ pub fn applyBuiltin(self: *VM, builtin_id: u16, args: []const Value) !Value {
         .resolve_flake_node => flakes.resolveFlakeNode(self, args[0], args[1], args[2]),
         .compute_nar_hash => fetch.computeNarHash(self, args[0], args[1]),
         .shallow_rev_count => fetch.shallowRevCount(self, args[0]),
+        .convertHash => hash.builtinConvertHash(self, args[0]),
     };
 }
