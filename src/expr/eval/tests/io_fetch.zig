@@ -1746,3 +1746,29 @@ test "a lock with a follows cycle or a follows to a missing input is rejected" {
         try std.testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "flake.lock", .{}));
     }
 }
+
+test "an override that makes a flake import itself is a circular import" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "f0");
+    try tmp.dir.createDirPath(std.testing.io, "f1");
+    try tmp.dir.createDirPath(std.testing.io, "f2");
+    const root = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(root);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f2/flake.nix", .data = "{ outputs = _: { v = 2; }; }" });
+    const f1 = try std.fmt.allocPrint(std.testing.allocator, "{{ inputs.b.url = \"path:{s}/f2\"; outputs = {{ b, ... }}: {{ v = b.v; }}; }}", .{root});
+    defer std.testing.allocator.free(f1);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f1/flake.nix", .data = f1 });
+    // f0 overrides f1's `b` with f1 itself.
+    const f0 = try std.fmt.allocPrint(std.testing.allocator, "{{ inputs.a.url = \"path:{s}/f1\"; inputs.a.inputs.b.url = \"path:{s}/f1\"; outputs = {{ a, ... }}: {{ v = a.v; }}; }}", .{ root, root });
+    defer std.testing.allocator.free(f0);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "f0/flake.nix", .data = f0 });
+
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    ev.setFileIo(std.testing.io);
+    ev.policy.flakes_enabled = true;
+    const src = try std.fmt.allocPrint(std.testing.allocator, "(builtins.getFlake \"path:{s}/f0\").v", .{root});
+    defer std.testing.allocator.free(src);
+    try std.testing.expectError(error.CircularFlakeImport, ev.evaluate(src));
+}

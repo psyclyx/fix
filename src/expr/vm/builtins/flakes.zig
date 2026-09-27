@@ -517,6 +517,9 @@ const LockGen = struct {
     update_all: bool = true, // re-pin every root input
     update_names: []const []const u8 = &.{}, // …or only these
     imported: std.StringHashMapUnmanaged([]const u8) = .empty, // existing node name → new key
+    /// The (declared) refs of the flakes being locked on the current path,
+    /// the root excluded, as Nix keeps them to find circular imports.
+    parents: std.ArrayListUnmanaged([]const u8) = .empty,
 
     /// A node key that is unique in the graph: the input name, or `name_N`.
     fn uniqueKey(self: *LockGen, name: []const u8) ![]const u8 {
@@ -784,6 +787,17 @@ fn lockInput(gen: *LockGen, name: []const u8, decl: Value, prefix: []const []con
             const child_prefix = try gen.arena.alloc([]const u8, prefix.len + 1);
             @memcpy(child_prefix[0..prefix.len], prefix);
             child_prefix[prefix.len] = name;
+            var ref_text: std.ArrayListUnmanaged(u8) = .empty;
+            try writeLockJson(&ref_text, gen.arena, try refAttrsToJson(gen, declared_ref), 0);
+            for (gen.parents.items) |parent| {
+                if (!std.mem.eql(u8, parent, ref_text.items)) continue;
+                const message = try std.fmt.allocPrint(self.allocator, "found circular import of flake input '{s}'", .{name});
+                defer self.allocator.free(message);
+                try vm_trace.setErrorMessage(self, message);
+                return error.CircularFlakeImport;
+            }
+            try gen.parents.append(gen.arena, ref_text.items);
+            defer _ = gen.parents.pop();
             const edges = try lockFlakeInputs(gen, child_flake, child_prefix, child_srcs.items);
             gen.nodes.items[node_index].inputs = edges;
         } else |_| {}
