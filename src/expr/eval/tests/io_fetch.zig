@@ -955,6 +955,7 @@ test "getFlake generates, writes, and uses a flake.lock when none exists" {
     defer ev.deinit();
     ev.setFileIo(std.testing.io);
     ev.policy.flakes_enabled = true;
+    ev.policy.write_flake_lock = true; // as the CLI does
 
     // follows redirects dep's `sub` to root's (v=1), not dep's own (v=99).
     const src = try std.fmt.allocPrint(std.testing.allocator, "(builtins.getFlake \"path:{s}\").d", .{d_root});
@@ -968,6 +969,42 @@ test "getFlake generates, writes, and uses a flake.lock when none exists" {
     try std.testing.expect(std.mem.indexOf(u8, lock, "\"version\": 7") != null);
     try std.testing.expect(std.mem.indexOf(u8, lock, "\"sub\": [\"sub\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, lock, "narHash") != null);
+}
+
+test "getFlake locks in memory without writing flake.lock, unless asked to" {
+    var t_dep = std.testing.tmpDir(.{});
+    defer t_dep.cleanup();
+    var t_root = std.testing.tmpDir(.{});
+    defer t_root.cleanup();
+    const d_dep = try t_dep.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(d_dep);
+    const d_root = try t_root.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(d_root);
+    try t_dep.dir.writeFile(std.testing.io, .{ .sub_path = "flake.nix", .data = "{ outputs = i: { v = 1; }; }" });
+    const root_nix = try std.fmt.allocPrint(std.testing.allocator, "{{ inputs.dep.url = \"path:{s}\"; outputs = {{ dep, ... }}: {{ v = dep.v; }}; }}", .{d_dep});
+    defer std.testing.allocator.free(root_nix);
+    try t_root.dir.writeFile(std.testing.io, .{ .sub_path = "flake.nix", .data = root_nix });
+
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    ev.setFileIo(std.testing.io);
+    ev.policy.flakes_enabled = true;
+    const src = try std.fmt.allocPrint(std.testing.allocator, "(builtins.getFlake \"path:{s}\").v", .{d_root});
+    defer std.testing.allocator.free(src);
+
+    // Evaluating must not change the flake's source tree (Nix's getFlake
+    // never writes a lock).
+    try std.testing.expectEqual(@as(i64, 1), (try ev.evaluate(src)).asInt());
+    try std.testing.expectError(error.FileNotFound, t_root.dir.access(std.testing.io, "flake.lock", .{}));
+
+    // The CLI asks for it, as `nix build` writes lock files.
+    var cli = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer cli.deinit();
+    cli.setFileIo(std.testing.io);
+    cli.policy.flakes_enabled = true;
+    cli.policy.write_flake_lock = true;
+    try std.testing.expectEqual(@as(i64, 1), (try cli.evaluate(src)).asInt());
+    try t_root.dir.access(std.testing.io, "flake.lock", .{});
 }
 
 test "getFlake resolves follows-the-root lock edges to the flake itself" {
@@ -1034,6 +1071,7 @@ test "lock generation records follows-the-root as an empty path" {
     defer ev.deinit();
     ev.setFileIo(std.testing.io);
     ev.policy.flakes_enabled = true;
+    ev.policy.write_flake_lock = true; // as the CLI does
 
     const src = try std.fmt.allocPrint(std.testing.allocator, "(builtins.getFlake \"path:{s}\").viaSelf", .{dir_r});
     defer std.testing.allocator.free(src);
@@ -1078,6 +1116,7 @@ test "child-declared follows lock relative to the declaring flake" {
     defer ev.deinit();
     ev.setFileIo(std.testing.io);
     ev.policy.flakes_enabled = true;
+    ev.policy.write_flake_lock = true; // as the CLI does
 
     inline for (.{ .{ "aliasV", 33 }, .{ "meD", 9 } }) |q| {
         const src = try std.fmt.allocPrint(std.testing.allocator, "(builtins.getFlake \"path:{s}\").{s}", .{ dir_r, q[0] });
@@ -1141,6 +1180,7 @@ test "deep override chains thread through lock generation" {
     defer ev.deinit();
     ev.setFileIo(std.testing.io);
     ev.policy.flakes_enabled = true;
+    ev.policy.write_flake_lock = true; // as the CLI does
 
     const src = try std.fmt.allocPrint(std.testing.allocator, "(builtins.getFlake \"path:{s}\").v", .{dir_r});
     defer std.testing.allocator.free(src);

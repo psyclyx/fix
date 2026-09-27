@@ -887,7 +887,8 @@ fn flakeInputsAttrs(self: *VM, flake_value: Value) !?Value {
 }
 
 /// getFlake's no-lock branch: compute a lock (pin every input), write it when
-/// the tree is writable, and resolve the root inputs from it. Returns false when
+/// the CLI asked for that and the tree is writable, and resolve the root
+/// inputs from it. Returns false when
 /// the flake declares no inputs. This is the "generate all" caller of the same
 /// lock machinery `computeFlakeLock` (flake update/lock) uses.
 fn generateAndUseLock(self: *VM, flake_value: Value, out_path: []const u8, dir: ?[]const u8, root_value: Value, out_entries: *std.ArrayListUnmanaged(heap_mod.AttrEntry)) !bool {
@@ -898,11 +899,14 @@ fn generateAndUseLock(self: *VM, flake_value: Value, out_path: []const u8, dir: 
     var gen = LockGen{ .vm = self, .arena = arena_state.allocator() };
     const lock_json = try serializeLock(&gen, try lockFlakeInputs(&gen, flake_value, &.{}, &.{}));
 
-    // Persist next to flake.nix when writable (a store path / read-only tree is
-    // left alone — the in-memory lock is still used for this evaluation).
-    const lock_path = try flakeLockPath(self, out_path, dir);
-    defer self.allocator.free(lock_path);
-    self.files.writeFile(lock_path, lock_json) catch {};
+    // Persist next to flake.nix for the CLI, when writable (a store path /
+    // read-only tree is left alone — the in-memory lock is still used for
+    // this evaluation).
+    if (self.policy.write_flake_lock) {
+        const lock_path = try flakeLockPath(self, out_path, dir);
+        defer self.allocator.free(lock_path);
+        self.files.writeFile(lock_path, lock_json) catch {};
+    }
 
     try resolveInputsFromLockData(self, lock_json, root_value, out_entries);
     return true;

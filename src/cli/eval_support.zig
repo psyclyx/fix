@@ -384,6 +384,10 @@ fn lowerFlakeInstallable(ev: *Engine, installable: []const u8, options: args.Sou
     else
         null;
     try ev.setPureEval(!options.impure, if (flake_dir) |d| &.{d} else &.{});
+    // Like `nix build`, a flake installable writes the lock file it computes.
+    var policy = ev.languagePolicy();
+    policy.write_flake_lock = true;
+    ev.configureLanguage(policy);
 
     const profile = flakeProfile(options.cmd);
 

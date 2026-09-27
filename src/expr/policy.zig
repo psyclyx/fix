@@ -78,6 +78,11 @@ pub const LanguagePolicy = struct {
     /// Extra filesystem roots readable under `pure_eval` (besides the store):
     /// the flake's own source tree(s). Borrowed; owned by the Engine.
     allowed_path_roots: []const []const u8 = &.{},
+    /// Write a newly computed `flake.lock` beside a writable flake, as the
+    /// `nix` CLI does for flake installables. Off for `builtins.getFlake`
+    /// itself, which only locks in memory, as in Nix: evaluating must not
+    /// change the source tree (and with it a `path:` flake's hash).
+    write_flake_lock: bool = false,
 
     pub fn applyFeatureSets(
         self: *LanguagePolicy,
