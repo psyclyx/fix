@@ -97,7 +97,7 @@ fn fetchTreeImpl(self: *VM, arg: Value, fetch_tree_defaults: bool) !Value {
     if (attrs.isPath()) {
         const path = self.intern.get(attrs.asInternId());
         if (try adoptStorePath(self, path, null, fetch.sourceLastModified(self, path))) |adopted| return adopted;
-        const out = try ingestFetchedTree(self, path, "source", "", null);
+        const out = try ingestFetchedTree(self, path, "source", .none);
         defer out.deinit(self.allocator);
         return pathTreeValue(self, out.out_path, out.nar_hash, fetch.sourceLastModified(self, path));
     }
@@ -126,7 +126,7 @@ fn fetchTreeImpl(self: *VM, arg: Value, fetch_tree_defaults: bool) !Value {
         const locked_hash = try optionalStringAttr(self, attrs_id, "narHash");
         defer if (locked_hash) |h| self.allocator.free(h);
         if (try adoptStorePath(self, path, locked_hash, last_modified)) |adopted| return adopted;
-        const out = try ingestFetchedTree(self, path, "source", "", null);
+        const out = try ingestFetchedTree(self, path, "source", .none);
         defer out.deinit(self.allocator);
         return pathTreeValue(self, out.out_path, out.nar_hash, last_modified);
     }
@@ -146,7 +146,7 @@ fn fetchTreeImpl(self: *VM, arg: Value, fetch_tree_defaults: bool) !Value {
         defer spec.deinit(self.allocator);
         const result = try offloadFetch(self, .tarball, FetchService.TarballSpec{ .url = spec.url, .name = spec.name });
         defer result.deinit(self.fetchers.allocator);
-        const out = try ingestFetchedTree(self, result.path, spec.name, "", null);
+        const out = try ingestFetchedTree(self, result.path, spec.name, .none);
         defer out.deinit(self.allocator);
         return pathTreeValue(self, out.out_path, out.nar_hash, (try optionalIntAttr(self, attrs_id, "lastModified")) orelse result.last_modified);
     }
@@ -181,7 +181,7 @@ fn fetchTreeImpl(self: *VM, arg: Value, fetch_tree_defaults: bool) !Value {
             .resolved_url_template = spec.resolved_url_template,
         });
         defer result.deinit(self.fetchers.allocator);
-        const out = try ingestFetchedTree(self, result.path, spec.name, spec.rev orelse "", null);
+        const out = try ingestFetchedTree(self, result.path, spec.name, .none);
         defer out.deinit(self.allocator);
         return githubTreeValue(self, out.out_path, out.nar_hash, spec.rev, result.forge_metadata, (try optionalIntAttr(self, attrs_id, "lastModified")) orelse 0);
     }
@@ -267,7 +267,7 @@ pub fn builtinGetFlake(self: *VM, arg: Value) !Value {
         // No lock: compute one (fetch + pin inputs), write it back when the
         // flake tree is writable, and resolve inputs from it. `flake update`
         // removes any existing lock first so this path re-pins to latest.
-        _ = try generateAndUseLock(self, flake_value, out_path, dir, self_cell, &input_entries);
+        _ = try generateAndUseLock(self, flake_value, parsed, dir, self_cell, &input_entries);
     }
     try input_entries.append(self.allocator, .{ .name = try self.intern.intern("self"), .value = self_cell });
 
@@ -878,6 +878,26 @@ fn flakeLockPath(self: *VM, out_path: []const u8, dir: ?[]const u8) ![]u8 {
         std.fs.path.join(self.allocator, &.{ out_path, "flake.lock" });
 }
 
+/// Where a new `flake.lock` goes, as in Nix: into the flake's own source
+/// tree when it is local (a `path:` flake, or a `git+file:` work tree),
+/// not into its (read-only) store path. Null for any other flake.
+fn sourceLockPath(self: *VM, ref_attrs: Value, dir: ?[]const u8) !?[]u8 {
+    const id = ref_attrs.asObjectId();
+    const type_value = try requiredStringAttr(self, id, "type");
+    defer self.allocator.free(type_value);
+    const source: ?[]u8 = if (std.mem.eql(u8, type_value, "path"))
+        try optionalStringAttr(self, id, "path")
+    else if (std.mem.eql(u8, type_value, "git")) git: {
+        const url = (try optionalStringAttr(self, id, "url")) orelse break :git null;
+        defer self.allocator.free(url);
+        const path = if (std.mem.startsWith(u8, url, "file://")) url["file://".len..] else if (std.fs.path.isAbsolute(url)) url else break :git null;
+        break :git try self.allocator.dupe(u8, path);
+    } else null;
+    const root = source orelse return null;
+    defer self.allocator.free(root);
+    return try flakeLockPath(self, root, dir);
+}
+
 /// The forced `inputs` attrset of a flake, or null when it declares none.
 fn flakeInputsAttrs(self: *VM, flake_value: Value) !?Value {
     const inputs_v = (self.heap.getAttrValueOpt(flake_value.asObjectId(), try self.intern.intern("inputs")) catch return null) orelse return null;
@@ -887,11 +907,11 @@ fn flakeInputsAttrs(self: *VM, flake_value: Value) !?Value {
 }
 
 /// getFlake's no-lock branch: compute a lock (pin every input), write it when
-/// the CLI asked for that and the tree is writable, and resolve the root
-/// inputs from it. Returns false when
-/// the flake declares no inputs. This is the "generate all" caller of the same
-/// lock machinery `computeFlakeLock` (flake update/lock) uses.
-fn generateAndUseLock(self: *VM, flake_value: Value, out_path: []const u8, dir: ?[]const u8, root_value: Value, out_entries: *std.ArrayListUnmanaged(heap_mod.AttrEntry)) !bool {
+/// the CLI asked for that and the flake is a local tree, and resolve the root
+/// inputs from it. Returns false when the flake declares no inputs. This is
+/// the "generate all" caller of the same lock machinery `computeFlakeLock`
+/// (flake update/lock) uses.
+fn generateAndUseLock(self: *VM, flake_value: Value, ref_attrs: Value, dir: ?[]const u8, root_value: Value, out_entries: *std.ArrayListUnmanaged(heap_mod.AttrEntry)) !bool {
     if ((try flakeInputsAttrs(self, flake_value)) == null) return false;
 
     var arena_state = std.heap.ArenaAllocator.init(self.allocator);
@@ -899,13 +919,14 @@ fn generateAndUseLock(self: *VM, flake_value: Value, out_path: []const u8, dir: 
     var gen = LockGen{ .vm = self, .arena = arena_state.allocator() };
     const lock_json = try serializeLock(&gen, try lockFlakeInputs(&gen, flake_value, &.{}, &.{}));
 
-    // Persist next to flake.nix for the CLI, when writable (a store path /
+    // Persist next to the local flake.nix for the CLI, when writable (a
     // read-only tree is left alone — the in-memory lock is still used for
     // this evaluation).
     if (self.policy.write_flake_lock) {
-        const lock_path = try flakeLockPath(self, out_path, dir);
-        defer self.allocator.free(lock_path);
-        self.files.writeFile(lock_path, lock_json) catch {};
+        if (try sourceLockPath(self, ref_attrs, dir)) |lock_path| {
+            defer self.allocator.free(lock_path);
+            self.files.writeFile(lock_path, lock_json) catch {};
+        }
     }
 
     try resolveInputsFromLockData(self, lock_json, root_value, out_entries);
@@ -936,6 +957,11 @@ pub fn computeFlakeLock(self: *VM, ref: []const u8, update_all: bool, update_nam
 
     const lock_path = try flakeLockPath(self, out_path, dir);
     defer self.allocator.free(lock_path);
+    const source_lock_path = (try sourceLockPath(self, parsed_ref, dir)) orelse {
+        try vm_trace.setErrorMessage(self, "cannot write the lock file of a flake that isn't a local path or git work tree");
+        return error.InvalidFlakeRef;
+    };
+    defer self.allocator.free(source_lock_path);
 
     var arena_state = std.heap.ArenaAllocator.init(self.allocator);
     defer arena_state.deinit();
@@ -960,7 +986,7 @@ pub fn computeFlakeLock(self: *VM, ref: []const u8, update_all: bool, update_nam
     } else |_| {}
 
     const lock_json = try serializeLock(&gen, try lockFlakeInputs(&gen, flake_value, &.{}, &.{}));
-    try self.files.writeFile(lock_path, lock_json);
+    try self.files.writeFile(source_lock_path, lock_json);
 }
 
 /// Internal builtin backing a lazy flake input (`inputs.<name>`): forced only

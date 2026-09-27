@@ -71,11 +71,7 @@ pub const FetchGitSpec = struct {
     }
 };
 
-/// A fetched tree's realized `outPath` and `narHash`. When store writes are
-/// enabled (`fix instantiate`/`build`) the tree is NAR-added to the real store
-/// and these are the store path + real SRI NAR hash; otherwise (plain `eval`)
-/// they are the local download-cache path + synthetic hash (offline-friendly,
-/// matching the pre-store behaviour).
+/// A fetched tree's store path and SRI NAR hash.
 pub const FetchedOut = struct {
     out_path: []u8,
     nar_hash: []u8,
@@ -86,37 +82,48 @@ pub const FetchedOut = struct {
     }
 };
 
-pub fn ingestFetchedTree(self: *VM, cache_path: []const u8, name: []const u8, rev: []const u8, filter: ?nar.Filter) !FetchedOut {
-    _ = rev;
-    if (self.realization.storeWritesEnabled()) {
-        // Fetched trees carry no user-lambda filter identity, so they are never
-        // filter-memoized (pass null); a null `filter` is unfiltered-memoized.
-        const ingested = try source_paths.ingest(self.allocator, self.realization, self.files, cache_path, name, filter, null);
-        return .{ .out_path = ingested.store_path, .nar_hash = ingested.nar_hash };
+/// The repository metadata left out of a fetched checkout.
+pub const Vcs = enum {
+    none,
+    git,
+    mercurial,
+
+    fn filter(self: Vcs) ?nar.Filter {
+        return switch (self) {
+            .none => null,
+            .git => git_filter,
+            .mercurial => hg_filter,
+        };
     }
-    // Plain eval: keep the on-disk cache path (readable) and defer the NAR hash
-    // (empty sentinel -> `treeNarHashValue` makes it a lazy thunk), so we match
-    // Nix's real narHash without eagerly hashing trees that aren't inspected.
-    const out_path = try self.allocator.dupe(u8, cache_path);
-    errdefer self.allocator.free(out_path);
-    const nar_hash = try self.allocator.dupe(u8, "");
-    errdefer self.allocator.free(nar_hash);
-    return .{
-        .out_path = out_path,
-        .nar_hash = nar_hash,
-    };
+
+    fn metadata(self: Vcs) ?[]const u8 {
+        return switch (self) {
+            .none => null,
+            .git => ".git",
+            .mercurial => ".hg",
+        };
+    }
+};
+
+/// Give a fetched tree its store path, as Nix does: NAR-hash it (minus the
+/// VCS metadata) and record the recipe that adds it to the store when a
+/// build needs it. With store writes (`fix instantiate`/`build`) reading it
+/// adds it; in plain eval its store path is mounted over `cache_path`
+/// instead, so it reads from the fetch cache and the store isn't written,
+/// but `outPath` and every drvPath built from it are the same as Nix's.
+pub fn ingestFetchedTree(self: *VM, cache_path: []const u8, name: []const u8, vcs: Vcs) !FetchedOut {
+    // Fetched trees carry no user-lambda filter identity, so they are never
+    // filter-memoized (pass null); a null `filter` is unfiltered-memoized.
+    const ingested = try source_paths.ingest(self.allocator, self.realization, self.files, cache_path, name, vcs.filter(), null);
+    errdefer ingested.deinit(self.allocator);
+    if (!self.realization.storeWritesEnabled()) try self.files.mount(ingested.store_path, cache_path, vcs.metadata());
+    return .{ .out_path = ingested.store_path, .nar_hash = ingested.nar_hash };
 }
 
-/// A fetched `outPath` string value. When the tree was materialized to the
-/// store it carries string context referencing that store path, so using it as
-/// a derivation `src` records it in `inputSrcs` (like Nix). Off-store (plain
-/// eval) it is a bare string of the download-cache path.
+/// A fetched `outPath` string value: its store path, with itself as context,
+/// so using it as a derivation `src` records it in `inputSrcs` (like Nix).
 fn fetchedPathValue(self: *VM, path: []const u8) !Value {
-    const id = try self.intern.intern(path);
-    return if (self.realization.storeWritesEnabled())
-        contextStringWithPath(self, id)
-    else
-        Value.string(id);
+    return contextStringWithPath(self, try self.intern.intern(path));
 }
 
 /// NAR filter that drops any `.git` entry, so a git checkout ingests as the
@@ -135,7 +142,7 @@ var hg_filter_ctx: u8 = 0;
 const hg_filter = nar.Filter{ .context = &hg_filter_ctx, .accept = hgFilterAccept };
 
 pub fn mercurialResultValue(self: *VM, name: []const u8, result: FetchService.MercurialResult) !Value {
-    const out = try ingestFetchedTree(self, result.out_path, name, result.rev, hg_filter);
+    const out = try ingestFetchedTree(self, result.out_path, name, .mercurial);
     defer out.deinit(self.allocator);
     const entries = [_]heap_mod.AttrEntry{
         .{ .name = try self.intern.intern("narHash"), .value = try treeNarHashValue(self, out.out_path, out.nar_hash, ".hg") },
@@ -272,7 +279,7 @@ pub const GitResultOptions = struct {
 
 pub fn gitResultValue(self: *VM, name: []const u8, url: []const u8, result: FetchService.GitResult, options: GitResultOptions) !Value {
     if (result.dirty) return dirtyGitResultValue(self, name, result, options.fetch_git);
-    const out = try ingestFetchedTree(self, result.out_path, name, result.rev, git_filter);
+    const out = try ingestFetchedTree(self, result.out_path, name, .git);
     defer out.deinit(self.allocator);
     // rev_count -1 marks a truncated history (the repository is shallow but
     // `shallow = true` was not passed): the attr exists but forcing it errors,
@@ -297,7 +304,7 @@ pub fn gitResultValue(self: *VM, name: []const u8, url: []const u8, result: Fetc
 /// A work tree with uncommitted changes isn't HEAD, so, as in Nix, it has
 /// no `rev`: `dirtyRev` names HEAD plus `-dirty` instead.
 fn dirtyGitResultValue(self: *VM, name: []const u8, result: FetchService.GitResult, fetch_git: bool) !Value {
-    const out = try ingestFetchedTree(self, result.out_path, name, "", git_filter);
+    const out = try ingestFetchedTree(self, result.out_path, name, .git);
     defer out.deinit(self.allocator);
     const dirty_rev = try std.fmt.allocPrint(self.allocator, "{s}-dirty", .{result.rev});
     defer self.allocator.free(dirty_rev);
@@ -654,7 +661,7 @@ pub fn builtinFetchTarball(self: *VM, arg: Value) !Value {
 
     // The unpacked tree is named "source" by default (Nix), independent of the
     // archive's URL basename which named the download (`tree_name`, above).
-    const out = try ingestFetchedTree(self, result.path, tree_name, "", null);
+    const out = try ingestFetchedTree(self, result.path, tree_name, .none);
     defer out.deinit(self.allocator);
     return fetchedPathValue(self, out.out_path);
 }

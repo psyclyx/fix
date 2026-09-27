@@ -27,6 +27,27 @@ fn testGitRepo(tmp: *std.testing.TmpDir) ![:0]u8 {
     return repo;
 }
 
+/// Evaluate `source` to a string (with or without context) and compare its
+/// text.
+fn expectStringValue(ev: *Engine, expected: []const u8, source: []const u8) !void {
+    const value = try ev.forceValue(try ev.evaluate(source));
+    const text = switch (value.kind()) {
+        .string => ev.intern.get(value.asInternId()),
+        .string_context => ev.intern.get((try ev.heap.getContextString(value.asObjectId())).text),
+        else => return error.TestExpectedString,
+    };
+    try std.testing.expectEqualStrings(expected, text);
+}
+
+/// `builtins.path { path = <dir>; name = "source"; }`: the store path Nix
+/// gives a local tree fetched by `fetchTree`/`getFlake`.
+fn sourceStorePath(ev: *Engine, dir: []const u8) ![]u8 {
+    const source = try std.fmt.allocPrint(std.testing.allocator, "builtins.unsafeDiscardStringContext (builtins.path {{ path = /. + \"{s}\"; name = \"source\"; }})", .{dir});
+    defer std.testing.allocator.free(source);
+    const value = try ev.forceValue(try ev.evaluate(source));
+    return std.testing.allocator.dupe(u8, ev.intern.get(value.asInternId()));
+}
+
 test "evaluate pathExists and readFile builtins through file cache" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -291,10 +312,11 @@ test "evaluate fetchGit builtin for local repository" {
     defer ev.deinit();
     ev.setFileIo(std.testing.io);
 
-    const out_path = try ev.evaluate(out_path_source);
-    const fetched_path = ev.intern.get(out_path.asInternId());
-    try std.testing.expect(!std.mem.eql(u8, cwd, fetched_path));
-    try std.testing.expect(std.mem.indexOf(u8, fetched_path, "/git-local/") != null);
+    // A store path (the snapshot is mounted there in plain eval), as in Nix.
+    const out_path = try ev.forceValue(try ev.evaluate(out_path_source));
+    const fetched_path = ev.intern.get((try ev.heap.getContextString(out_path.asObjectId())).text);
+    try std.testing.expect(std.mem.startsWith(u8, fetched_path, "/nix/store/"));
+    try std.testing.expect(std.mem.endsWith(u8, fetched_path, "-source"));
 
     const short_rev_len = try ev.evaluate(short_rev_source);
     try std.testing.expectEqual(@as(i64, 7), short_rev_len.asInt());
@@ -612,8 +634,10 @@ test "evaluate fetchTree builtin through fetch cache" {
     ev.setFileIo(std.testing.io);
     ev.policy.fetch_tree_enabled = true;
 
-    const out_path = try ev.evaluate(path_source);
-    try std.testing.expectEqualStrings(cwd, ev.intern.get(out_path.asInternId()));
+    // The tree's store path, as Nix gives it, even without store writes.
+    const expected_out = try sourceStorePath(&ev, cwd);
+    defer std.testing.allocator.free(expected_out);
+    try expectStringValue(&ev, expected_out, path_source);
 
     const contents = try ev.evaluate(file_source);
     try std.testing.expectEqualStrings("payload", ev.intern.get(contents.asInternId()));
@@ -744,8 +768,9 @@ test "evaluate getFlake builtin for local path ref" {
 
     try std.testing.expectEqual(@as(i64, 7), (try ev.evaluate(value_source)).asInt());
     try std.testing.expectEqual(@as(i64, 7), (try ev.evaluate(output_source)).asInt());
-    const self_path = try ev.evaluate(self_source);
-    try std.testing.expectEqualStrings(flake_dir, ev.intern.get(self_path.asInternId()));
+    const expected_self = try sourceStorePath(&ev, flake_dir);
+    defer std.testing.allocator.free(expected_self);
+    try expectStringValue(&ev, expected_self, self_source);
     // A local path flake's `lastModified` is the tree's mtime (the dir was
     // just written), not the hardcoded epoch — nixpkgs derives its version
     // suffix from this.
@@ -797,10 +822,12 @@ test "getFlake ties self into the outputs fixpoint" {
     try std.testing.expectEqual(@as(i64, 42), (try ev.evaluate(doubled)).asInt());
     try std.testing.expectEqual(@as(i64, 22), (try ev.evaluate(pkg)).asInt());
     try std.testing.expectEqual(@as(i64, 21), (try ev.evaluate(via)).asInt());
-    // `self.outPath` is the flake's source path, and `self.sourceInfo.outPath`
+    // `self.outPath` is the flake's store path, and `self.sourceInfo.outPath`
     // is the same value — both reachable through the fixpoint.
-    try std.testing.expectEqualStrings(flake_dir, ev.intern.get((try ev.evaluate(self_path)).asInternId()));
-    try std.testing.expectEqualStrings(flake_dir, ev.intern.get((try ev.evaluate(via_source)).asInternId()));
+    const expected_self = try sourceStorePath(&ev, flake_dir);
+    defer std.testing.allocator.free(expected_self);
+    try expectStringValue(&ev, expected_self, self_path);
+    try expectStringValue(&ev, expected_self, via_source);
 }
 
 test "getFlake resolves inputs from flake.lock (transitive + follows + diamond)" {
