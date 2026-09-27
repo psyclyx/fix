@@ -392,6 +392,8 @@ test "fetchGit and fetchTree follow Nix's shallow defaults for revCount" {
         .{ .args = "builtins.fetchGit {{ url = \"{s}\"; shallow = true; }}", .has_rev_count = true },
         .{ .args = "builtins.fetchTree {{ type = \"git\"; url = \"{s}\"; }}", .has_rev_count = false },
         .{ .args = "builtins.fetchTree {{ type = \"git\"; url = \"{s}\"; shallow = false; }}", .has_rev_count = true },
+        // A URL string doesn't get the attrset's `shallow = true` default.
+        .{ .args = "builtins.fetchTree \"git+file://{s}\"", .has_rev_count = true },
     };
     inline for (cases) |case| {
         const source = try std.fmt.allocPrint(std.testing.allocator, "builtins.hasAttr \"revCount\" (" ++ case.args ++ ")", .{cwd});

@@ -161,8 +161,10 @@ fn fetchTreeImpl(self: *VM, arg: Value, fetch_tree_defaults: bool) !Value {
         return pathTreeValue(self, out.out_path, out.nar_hash, fetch.sourceLastModified(self, path));
     }
     if (attrs.isString()) {
+        // Nix's `Input::fromURL`: only an attrset argument gets `fetchTree`'s
+        // `shallow = true` default, so a git URL has its `revCount`.
         const parsed = try builtinParseFlakeRef(self, attrs);
-        return fetchTreeImpl(self, parsed, fetch_tree_defaults);
+        return fetchTreeImpl(self, parsed, false);
     }
     if (!attrs.isAttrs()) return error.TypeError;
 
