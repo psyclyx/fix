@@ -259,10 +259,19 @@ pub fn builtinFetchGit(self: *VM, arg: Value) !Value {
     // fetchGit always carries `revCount` (0 for a shallow fetch): Nix's
     // emitTreeAttrs backfills it for the legacy builtin. Only fetchTree
     // omits it (see the flakes call site).
-    return gitResultValue(self, spec.name, spec.url, result, false);
+    return gitResultValue(self, spec.name, spec.url, result, .{ .fetch_git = true });
 }
 
-pub fn gitResultValue(self: *VM, name: []const u8, url: []const u8, result: FetchService.GitResult, omit_rev_count: bool) !Value {
+pub const GitResultOptions = struct {
+    /// Leave out `revCount` (a shallow `fetchTree`).
+    omit_rev_count: bool = false,
+    /// `builtins.fetchGit`'s compatibility attrs: a dirty tree still gets a
+    /// `rev` (all zeroes) and a `revCount` (0).
+    fetch_git: bool = false,
+};
+
+pub fn gitResultValue(self: *VM, name: []const u8, url: []const u8, result: FetchService.GitResult, options: GitResultOptions) !Value {
+    if (result.dirty) return dirtyGitResultValue(self, name, result, options.fetch_git);
     const out = try ingestFetchedTree(self, result.out_path, name, result.rev, git_filter);
     defer out.deinit(self.allocator);
     // rev_count -1 marks a truncated history (the repository is shallow but
@@ -282,7 +291,37 @@ pub fn gitResultValue(self: *VM, name: []const u8, url: []const u8, result: Fetc
         .{ .name = try self.intern.intern("submodules"), .value = Value.boolVal(result.submodules) },
         .{ .name = try self.intern.intern("revCount"), .value = rev_count_value },
     };
-    return Value.attrs(try self.heap.addAttrs(entries[0 .. entries.len - @intFromBool(omit_rev_count)]));
+    return Value.attrs(try self.heap.addAttrs(entries[0 .. entries.len - @intFromBool(options.omit_rev_count)]));
+}
+
+/// A work tree with uncommitted changes isn't HEAD, so, as in Nix, it has
+/// no `rev`: `dirtyRev` names HEAD plus `-dirty` instead.
+fn dirtyGitResultValue(self: *VM, name: []const u8, result: FetchService.GitResult, fetch_git: bool) !Value {
+    const out = try ingestFetchedTree(self, result.out_path, name, "", git_filter);
+    defer out.deinit(self.allocator);
+    const dirty_rev = try std.fmt.allocPrint(self.allocator, "{s}-dirty", .{result.rev});
+    defer self.allocator.free(dirty_rev);
+    const dirty_short_rev = try std.fmt.allocPrint(self.allocator, "{s}-dirty", .{result.short_rev});
+    defer self.allocator.free(dirty_short_rev);
+    var entries: std.ArrayListUnmanaged(heap_mod.AttrEntry) = .empty;
+    defer entries.deinit(self.allocator);
+    try entries.appendSlice(self.allocator, &.{
+        .{ .name = try self.intern.intern("dirtyRev"), .value = Value.string(try self.intern.intern(dirty_rev)) },
+        .{ .name = try self.intern.intern("dirtyShortRev"), .value = Value.string(try self.intern.intern(dirty_short_rev)) },
+        .{ .name = try self.intern.intern("lastModified"), .value = Value.int(result.last_modified) },
+        .{ .name = try self.intern.intern("lastModifiedDate"), .value = Value.string(try self.intern.intern(result.last_modified_date)) },
+        .{ .name = try self.intern.intern("narHash"), .value = try treeNarHashValue(self, out.out_path, out.nar_hash, ".git") },
+        .{ .name = try self.intern.intern("outPath"), .value = try fetchedPathValue(self, out.out_path) },
+        .{ .name = try self.intern.intern("submodules"), .value = Value.boolVal(result.submodules) },
+    });
+    if (fetch_git) {
+        try entries.appendSlice(self.allocator, &.{
+            .{ .name = try self.intern.intern("rev"), .value = Value.string(try self.intern.intern("0" ** 40)) },
+            .{ .name = try self.intern.intern("shortRev"), .value = Value.string(try self.intern.intern("0" ** 7)) },
+            .{ .name = try self.intern.intern("revCount"), .value = Value.int(0) },
+        });
+    }
+    return Value.attrs(try self.heap.addAttrs(entries.items));
 }
 
 pub fn shallowRevCount(self: *VM, url_value: Value) !Value {

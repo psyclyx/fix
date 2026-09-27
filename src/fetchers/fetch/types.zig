@@ -97,6 +97,9 @@ pub const GitResult = struct {
     last_modified: i64,
     last_modified_date: []u8,
     submodules: bool,
+    /// A local work tree with uncommitted changes to tracked files: `rev` is
+    /// HEAD, but the tree isn't HEAD's.
+    dirty: bool = false,
 
     pub fn deinit(self: GitResult, allocator: std.mem.Allocator) void {
         allocator.free(self.out_path);

@@ -1099,6 +1099,7 @@ pub const FetchCache = struct {
             .last_modified = result.last_modified,
             .last_modified_date = last_modified_date,
             .submodules = submodules,
+            .dirty = result.dirty,
         };
     }
 

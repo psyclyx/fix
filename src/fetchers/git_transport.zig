@@ -30,6 +30,8 @@ pub const Result = struct {
     rev_count: i64,
     last_modified: i64,
     last_modified_date: [14]u8,
+    /// A work tree whose tracked files differ from `rev` (HEAD).
+    dirty: bool = false,
 };
 
 /// Every fault this file reports through `materialize` or `snapshotLocal`,
@@ -92,10 +94,12 @@ pub fn snapshotLocal(
     try std.Io.Dir.cwd().createDirPath(io, destination);
     if (rev != null) {
         try exportCommit(allocator, io, &repo, commit_info.tree, repository_path, destination, submodules, &diag);
-    } else {
-        try copyTrackedWorktree(allocator, io, &repo, repository_path, destination, submodules);
+        return resultFromCommit(allocator, &repo, commit_oid, commit_info.committer_when, shallow, &diag);
     }
-    return resultFromCommit(allocator, &repo, commit_oid, commit_info.committer_when, shallow, &diag);
+    try copyTrackedWorktree(allocator, io, &repo, repository_path, destination, submodules);
+    var result = try resultFromCommit(allocator, &repo, commit_oid, commit_info.committer_when, shallow, &diag);
+    result.dirty = try workTreeIsDirty(allocator, io, &repo, commit_info.tree, &diag);
+    return result;
 }
 
 /// Clone or refresh a worktree, resolve the requested commit, then cleanly
@@ -343,6 +347,156 @@ fn copyTrackedWorktree(
             else => {},
         }
     }
+}
+
+/// Nix's notion of a dirty work tree, which is libgit2's status without
+/// untracked files or submodules: some tracked file differs between HEAD
+/// and the index (staged), or between the index and the work tree.
+fn workTreeIsDirty(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    repo: *ziggit.Repository,
+    head_tree: ziggit.Oid,
+    diag: ?*?ziggit.Diagnostic,
+) !bool {
+    const work_tree = repo.layout.work_tree orelse return false;
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var committed: std.StringHashMapUnmanaged(ziggit.Tree.Entry) = .empty;
+    try flattenTree(arena, repo, head_tree, "", &committed, diag);
+
+    // No index is an index with nothing in it: HEAD's files are all staged
+    // for deletion.
+    var index: ?ziggit.WorktreeIndex = ziggit.WorktreeIndex.open(allocator, io, repo.layout.git_dir, repo.format) catch |err| switch (err) {
+        error.IndexNotFound => null,
+        else => return mapError(err),
+    };
+    defer if (index) |*i| i.deinit();
+    const entries: []const ziggit.IndexEntry = if (index) |i| i.entries else &.{};
+    // Git's racy-clean rule: a file modified no earlier than the index was
+    // written may have changed within the same timestamp, so its stat data
+    // proves nothing.
+    const index_mtime: ?i96 = if (index != null)
+        (repo.layout.git_dir.statFile(io, "index", .{}) catch return error.FetchGitFailed).mtime.nanoseconds
+    else
+        null;
+
+    for (entries) |entry| {
+        // An unresolved merge conflict.
+        if (entry.stage != .merged) return true;
+        const head_entry = committed.fetchRemove(entry.path);
+        if (entry.mode == .gitlink) {
+            // Submodules don't count, unless one replaced a file.
+            if (head_entry) |kv| if (kv.value.mode != .gitlink) return true;
+            continue;
+        }
+        const head = (head_entry orelse return true).value;
+        if (head.mode != entry.mode or !head.oid.eql(entry.oid)) return true;
+        if (try workTreeEntryChanged(io, repo.format, work_tree, entry, index_mtime.?)) return true;
+    }
+    // What HEAD has and the index doesn't is a staged deletion.
+    var rest = committed.valueIterator();
+    while (rest.next()) |head| if (head.mode != .gitlink) return true;
+    return false;
+}
+
+/// Every non-tree entry reachable from `tree_oid`, by its path from the
+/// root. Allocates everything, names included, in `arena`.
+fn flattenTree(
+    arena: std.mem.Allocator,
+    repo: *ziggit.Repository,
+    tree_oid: ziggit.Oid,
+    prefix: []const u8,
+    out: *std.StringHashMapUnmanaged(ziggit.Tree.Entry),
+    diag: ?*?ziggit.Diagnostic,
+) !void {
+    const bytes = repo.odb.readAlloc(arena, tree_oid, max_tree_object_len, diag) catch |err| return mapError(err);
+    const tree = ziggit.Tree.parse(arena, repo.format, bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.CorruptTree => return error.FetchGitFailed,
+    };
+    for (tree.entries) |entry| {
+        const path = if (prefix.len == 0) entry.name else try std.fmt.allocPrint(arena, "{s}/{s}", .{ prefix, entry.name });
+        if (entry.mode == .tree) {
+            try flattenTree(arena, repo, entry.oid, path, out, diag);
+        } else {
+            try out.put(arena, path, entry);
+        }
+    }
+}
+
+/// Whether the work tree's copy of `entry` differs from it. As in git, the
+/// stat data the index recorded settles it when it still matches and the
+/// entry isn't racily clean; otherwise the file is hashed. Files are
+/// compared raw, without `.gitattributes` filters.
+fn workTreeEntryChanged(
+    io: std.Io,
+    format: ziggit.Format,
+    work_tree: std.Io.Dir,
+    entry: ziggit.IndexEntry,
+    index_mtime: i96,
+) !bool {
+    const stat = work_tree.statFile(io, entry.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return true,
+        else => return error.FetchGitFailed,
+    };
+    switch (entry.mode) {
+        .symlink => if (stat.kind != .sym_link) return true,
+        .blob, .blob_executable => {
+            if (stat.kind != .file) return true;
+            const executable = @intFromEnum(stat.permissions) & 0o100 != 0;
+            if (executable != (entry.mode == .blob_executable)) return true;
+        },
+        .tree, .gitlink => return true,
+    }
+
+    const size: u32 = @truncate(stat.size);
+    // A recorded size of 0 can be stat data git never filled in, not an
+    // empty file, so only a nonzero one is trusted to differ.
+    if (entry.size != 0 and entry.size != size) return true;
+    const recorded = entry.stat;
+    if (entry.size == size and
+        indexTimeEql(recorded.mtime_seconds, recorded.mtime_nanoseconds, stat.mtime) and
+        indexTimeEql(recorded.ctime_seconds, recorded.ctime_nanoseconds, stat.ctime) and
+        recorded.ino == @as(u32, @truncate(stat.inode)) and
+        stat.mtime.nanoseconds < index_mtime)
+    {
+        return false;
+    }
+
+    var hasher = ziggit.Hasher.init(format);
+    var header: [32]u8 = undefined;
+    if (stat.kind == .sym_link) {
+        var target: [std.fs.max_path_bytes]u8 = undefined;
+        const length = work_tree.readLink(io, entry.path, &target) catch return error.FetchGitFailed;
+        hasher.update(std.fmt.bufPrint(&header, "blob {d}\x00", .{length}) catch unreachable);
+        hasher.update(target[0..length]);
+    } else {
+        var file = work_tree.openFile(io, entry.path, .{}) catch return error.FetchGitFailed;
+        defer file.close(io);
+        var buffer: [8192]u8 = undefined;
+        var reader = file.reader(io, &buffer);
+        hasher.update(std.fmt.bufPrint(&header, "blob {d}\x00", .{stat.size}) catch unreachable);
+        while (true) {
+            const bytes = reader.interface.peekGreedy(1) catch |err| switch (err) {
+                error.EndOfStream => break,
+                error.ReadFailed => return error.FetchGitFailed,
+            };
+            hasher.update(bytes);
+            reader.interface.toss(bytes.len);
+        }
+    }
+    return !hasher.final().eql(entry.oid);
+}
+
+/// Whether an index timestamp, stored as git stores it (32-bit seconds and
+/// the nanoseconds within them), is `time`.
+fn indexTimeEql(seconds: u32, nanoseconds: u32, time: std.Io.Timestamp) bool {
+    const whole = @divFloor(time.nanoseconds, std.time.ns_per_s);
+    return seconds == @as(u32, @truncate(@as(u96, @bitCast(whole)))) and
+        nanoseconds == @as(u32, @intCast(time.nanoseconds - whole * std.time.ns_per_s));
 }
 
 fn exportCommit(
@@ -715,7 +869,7 @@ const test_commit_when: i64 = 1_700_000_000;
 /// from a directory walk: `snapshotLocal` with no rev reads `.git/index` to
 /// decide what is tracked, so a fixture with no index exercises none of
 /// that path.
-fn createTestCommit(allocator: std.mem.Allocator, io: std.Io, repository_path: []const u8, message: []const u8) !void {
+pub fn createTestCommit(allocator: std.mem.Allocator, io: std.Io, repository_path: []const u8, message: []const u8) !void {
     var diag: ?ziggit.Diagnostic = null;
     defer if (diag) |*d| d.deinit(allocator);
 
@@ -1067,4 +1221,37 @@ test "an unpinned snapshot keeps dirty tracked edits and excludes untracked file
     try testing.expectError(error.FileNotFound, dir.statFile(testing.io, "untracked", .{}));
     // Repository metadata is never part of a snapshot.
     try testing.expectError(error.FileNotFound, dir.statFile(testing.io, ".git", .{}));
+}
+
+test "a local snapshot is dirty only when a tracked file changed" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(testing.io, "source", .default_dir);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "source/file", .data = "one" });
+    const source = try tmp.dir.realPathFileAlloc(testing.io, "source", testing.allocator);
+    defer testing.allocator.free(source);
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    try createTestCommit(testing.allocator, testing.io, source, "one");
+
+    // An untracked file alone doesn't make the tree dirty.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "source/untracked", .data = "u" });
+    const clean_dest = try std.fs.path.join(testing.allocator, &.{ root, "clean" });
+    defer testing.allocator.free(clean_dest);
+    const clean = try snapshotLocal(testing.allocator, testing.io, source, clean_dest, null, false, false);
+    try testing.expect(!clean.dirty);
+
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "source/file", .data = "two" });
+    const dirty_dest = try std.fs.path.join(testing.allocator, &.{ root, "dirty" });
+    defer testing.allocator.free(dirty_dest);
+    const dirty = try snapshotLocal(testing.allocator, testing.io, source, dirty_dest, null, false, false);
+    try testing.expect(dirty.dirty);
+    try testing.expectEqualSlices(u8, &clean.rev, &dirty.rev);
+
+    // A pinned revision is never dirty.
+    const pinned_dest = try std.fs.path.join(testing.allocator, &.{ root, "pinned" });
+    defer testing.allocator.free(pinned_dest);
+    const pinned = try snapshotLocal(testing.allocator, testing.io, source, pinned_dest, &clean.rev, false, false);
+    try testing.expect(!pinned.dirty);
 }

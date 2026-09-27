@@ -156,7 +156,7 @@ fn fetchTreeImpl(self: *VM, arg: Value, fetch_tree_defaults: bool) !Value {
         defer spec.deinit(self.allocator);
         const result = try offloadFetch(self, .git, spec.borrowed());
         defer result.deinit(self.fetchers.allocator);
-        return gitResultValue(self, spec.name, spec.url, result, spec.shallow);
+        return gitResultValue(self, spec.name, spec.url, result, .{ .omit_rev_count = spec.shallow });
     }
 
     if (std.mem.eql(u8, type_value, "github") or std.mem.eql(u8, type_value, "gitlab") or std.mem.eql(u8, type_value, "sourcehut")) {

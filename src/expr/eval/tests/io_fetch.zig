@@ -13,6 +13,19 @@ const renderWithFlakes = helpers.renderWithFlakes;
 const renderStrictForTest = helpers.renderStrictForTest;
 const renderForTestFromCurrentPath = helpers.renderForTestFromCurrentPath;
 const renderXmlForTest = helpers.renderXmlForTest;
+const git_transport = @import("fetchers").git_transport;
+
+/// A one-commit git repository at `<tmp>/repo`, for the fetchGit/fetchTree
+/// tests: fetching the fix checkout itself would depend on whether it has
+/// uncommitted changes. Returns its absolute path.
+fn testGitRepo(tmp: *std.testing.TmpDir) ![:0]u8 {
+    try tmp.dir.createDir(std.testing.io, "repo", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "repo/file", .data = "one" });
+    const repo = try tmp.dir.realPathFileAlloc(std.testing.io, "repo", std.testing.allocator);
+    errdefer std.testing.allocator.free(repo);
+    try git_transport.createTestCommit(std.testing.allocator, std.testing.io, repo, "one");
+    return repo;
+}
 
 test "evaluate pathExists and readFile builtins through file cache" {
     var tmp = std.testing.tmpDir(.{});
@@ -261,8 +274,11 @@ test "evaluate filterSource builtin through file cache" {
 }
 
 test "evaluate fetchGit builtin for local repository" {
-    const cwd = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try testGitRepo(&tmp);
     defer std.testing.allocator.free(cwd);
+    try tmp.dir.createDir(std.testing.io, "repo/.zig-cache", .default_dir);
 
     const out_path_source = try std.fmt.allocPrint(std.testing.allocator, "(builtins.fetchGit {{ url = \"{s}\"; }}).outPath", .{cwd});
     defer std.testing.allocator.free(out_path_source);
@@ -286,8 +302,53 @@ test "evaluate fetchGit builtin for local repository" {
     try std.testing.expect(!includes_untracked.asBool());
 }
 
+test "a dirty git work tree has dirtyRev instead of rev" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const repo = try testGitRepo(&tmp);
+    defer std.testing.allocator.free(repo);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "repo/file", .data = "two" });
+
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    ev.setFileIo(std.testing.io);
+    ev.policy.fetch_tree_enabled = true;
+
+    // fetchTree: no rev at all; fetchGit adds Nix's all-zero rev and revCount 0.
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "builtins.fetchTree {{ type = \"git\"; url = \"{s}\"; }}", "[ \"dirtyRev\" \"dirtyShortRev\" \"lastModified\" \"lastModifiedDate\" \"narHash\" \"outPath\" \"submodules\" ]" },
+        .{ "builtins.fetchGit \"{s}\"", "[ \"dirtyRev\" \"dirtyShortRev\" \"lastModified\" \"lastModifiedDate\" \"narHash\" \"outPath\" \"rev\" \"revCount\" \"shortRev\" \"submodules\" ]" },
+    };
+    inline for (cases) |case| {
+        const source = try std.fmt.allocPrint(std.testing.allocator, "builtins.attrNames (" ++ case[0] ++ ")", .{repo});
+        defer std.testing.allocator.free(source);
+        const names = try ev.evaluate(source);
+        try ev.forceDeep(names);
+        var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer out.deinit();
+        try ev.writeValue(&out.writer, names);
+        try std.testing.expectEqualStrings(case[1], out.written());
+    }
+
+    const fields = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "let t = builtins.fetchTree {{ type = \"git\"; url = \"{s}\"; }}; g = builtins.fetchGit \"{s}\"; in " ++
+            "[ (builtins.stringLength t.dirtyRev) (builtins.stringLength t.dirtyShortRev) g.rev g.shortRev g.revCount ]",
+        .{ repo, repo },
+    );
+    defer std.testing.allocator.free(fields);
+    const got = try ev.evaluate(fields);
+    try ev.forceDeep(got);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try ev.writeValue(&out.writer, got);
+    try std.testing.expectEqualStrings("[ 46 13 \"0000000000000000000000000000000000000000\" \"0000000\" 0 ]", out.written());
+}
+
 test "fetchGit and fetchTree follow Nix's shallow defaults for revCount" {
-    const cwd = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try testGitRepo(&tmp);
     defer std.testing.allocator.free(cwd);
 
     var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
@@ -541,7 +602,9 @@ test "evaluate fetchTree builtin through fetch cache" {
     defer std.testing.allocator.free(path_source);
     const file_source = try std.fmt.allocPrint(std.testing.allocator, "builtins.readFile (builtins.fetchTree {{ type = \"file\"; url = \"file://{s}\"; }}).outPath", .{file_path});
     defer std.testing.allocator.free(file_source);
-    const git_source = try std.fmt.allocPrint(std.testing.allocator, "builtins.stringLength (builtins.fetchTree {{ type = \"git\"; url = \"{s}\"; }}).shortRev", .{cwd});
+    const repo = try testGitRepo(&tmp);
+    defer std.testing.allocator.free(repo);
+    const git_source = try std.fmt.allocPrint(std.testing.allocator, "builtins.stringLength (builtins.fetchTree {{ type = \"git\"; url = \"{s}\"; }}).shortRev", .{repo});
     defer std.testing.allocator.free(git_source);
 
     var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
