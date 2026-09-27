@@ -59,7 +59,7 @@ pub fn builtinDirOf(self: *VM, arg: Value) !Value {
 }
 
 pub fn builtinPlaceholder(self: *VM, arg: Value) !Value {
-    const output = try stringArg(self, arg);
+    const output = try vm_strings.noContextString(self, arg);
     const fingerprint = try std.fmt.allocPrint(self.allocator, "nix-output:{s}", .{output});
     defer self.allocator.free(fingerprint);
     const hash = try nix_hash.hashBytesNixBase32(self.allocator, "sha256", fingerprint);

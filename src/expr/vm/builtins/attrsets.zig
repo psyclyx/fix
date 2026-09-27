@@ -21,8 +21,10 @@ const stringTextInternId = strings.stringTextInternId;
 
 pub fn builtinCatAttrs(self: *VM, name_arg: Value, list_arg: Value) !Value {
     const name = try vm_force.forceValue(self, name_arg);
+    if (!isPlainString(name)) return error.TypeError;
+    try vm_strings.rejectContext(self, name);
     const list = try vm_force.forceValue(self, list_arg);
-    if (!isPlainString(name) or !list.isList()) return error.TypeError;
+    if (!list.isList()) return error.TypeError;
 
     var values: std.ArrayListUnmanaged(Value) = .empty;
     defer values.deinit(self.allocator);
@@ -240,8 +242,10 @@ pub fn builtinFunctionArgs(self: *VM, arg: Value) !Value {
 
 pub fn builtinUnsafeGetAttrPos(self: *VM, name_arg: Value, attrs_arg: Value) !Value {
     const name = try vm_force.forceValue(self, name_arg);
+    if (!isPlainString(name)) return error.TypeError;
+    try vm_strings.rejectContext(self, name);
     const attrs = try vm_force.forceValue(self, attrs_arg);
-    if (!isPlainString(name) or !attrs.isAttrs()) return error.TypeError;
+    if (!attrs.isAttrs()) return error.TypeError;
     const object_id = attrs.asObjectId();
     const name_id = if (name.isHeapString())
         (try vm_strings.lookupNameId(self, name)) orelse return Value.null_val
@@ -294,6 +298,7 @@ pub fn builtinRemoveAttrs(self: *VM, attrs_arg: Value, names_arg: Value) !Value 
     while (j < names_len) : (j += 1) {
         const value = try vm_force.forceValue(self, try self.heap.getListItem(names_id, j));
         if (!isPlainString(value)) return error.TypeError;
+        try vm_strings.rejectContext(self, value);
         // A name absent from the intern table matches no entry, so it
         // needn't be interned.
         if (try vm_strings.lookupNameId(self, value)) |name_id| try resolved.append(self.allocator, name_id);

@@ -606,7 +606,7 @@ fn writeXmlEscaped(writer: *std.Io.Writer, text: []const u8) !void {
 }
 
 pub fn builtinFromJSON(self: *VM, arg: Value) !Value {
-    const text = try stringArg(self, arg);
+    const text = try vm_strings.noContextString(self, arg);
     // Duplicate object keys keep the last value, matching Nix (`{"k":1,"k":2}`
     // → `{ k = 2; }`) rather than erroring.
     var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, text, .{
@@ -657,7 +657,7 @@ fn attrsFromJson(self: *VM, object: std.json.ObjectMap) !Value {
 }
 
 pub fn builtinFromTOML(self: *VM, arg: Value) !Value {
-    const text = try stringArg(self, arg);
+    const text = try vm_strings.noContextString(self, arg);
     var parsed = try toml.parse(self.allocator, text);
     defer parsed.deinit();
     return valueFromToml(self, .{ .table = parsed.root });
@@ -697,13 +697,15 @@ pub fn builtinCompareVersions(self: *VM, left_arg: Value, right_arg: Value) !Val
     const left_value = try vm_force.forceValue(self, left_arg);
     const right_value = try vm_force.forceValue(self, right_arg);
     if (!isPlainString(left_value) or !isPlainString(right_value)) return error.TypeError;
+    try vm_strings.rejectContext(self, left_value);
+    try vm_strings.rejectContext(self, right_value);
     const left = try vm_strings.stringBytes(self, left_value);
     const right = try vm_strings.stringBytes(self, right_value);
     return Value.int(version.compareVersions(left, right));
 }
 
 pub fn builtinSplitVersion(self: *VM, arg: Value) !Value {
-    const text = try stringArg(self, arg);
+    const text = try vm_strings.noContextString(self, arg);
     const parts = try version.splitVersion(self.allocator, text);
     defer self.allocator.free(parts);
 
@@ -729,6 +731,7 @@ pub fn builtinMatch(self: *VM, regex_arg: Value, text_arg: Value) !Value {
     const pattern_value = try vm_force.forceValue(self, regex_arg);
     const text_value = try vm_force.forceValue(self, text_arg);
     if (!isPlainString(pattern_value) or !isPlainString(text_value)) return error.TypeError;
+    try vm_strings.rejectContext(self, pattern_value);
     // The PatternCache is keyed by intern id, so a heap-resident pattern
     // interns here (patterns are short and bounded in number).
     const pattern_id = try vm_strings.stringNameId(self, pattern_value);
@@ -747,6 +750,7 @@ pub fn builtinSplit(self: *VM, regex_arg: Value, text_arg: Value) !Value {
     const pattern_value = try vm_force.forceValue(self, regex_arg);
     const text_value = try vm_force.forceValue(self, text_arg);
     if (!isPlainString(pattern_value) or !isPlainString(text_value)) return error.TypeError;
+    try vm_strings.rejectContext(self, pattern_value);
     const pattern_id = try vm_strings.stringNameId(self, pattern_value);
     const text = try vm_strings.stringBytes(self, text_value);
 
@@ -797,7 +801,7 @@ fn regexCapturesValue(self: *VM, captures: []const ?[]const u8) !Value {
 }
 
 pub fn builtinParseDrvName(self: *VM, arg: Value) !Value {
-    const parsed = version.parseDrvName(try stringArg(self, arg));
+    const parsed = version.parseDrvName(try vm_strings.noContextString(self, arg));
     const entries = [_]heap_mod.AttrEntry{
         .{
             .name = try self.intern.intern("name"),

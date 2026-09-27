@@ -243,13 +243,77 @@ pub fn lookupNameId(self: *VM, value: Value) !?InternId {
 /// Interned strings pass through untouched (the hot path); a heap string
 /// probes without inserting, mapping a miss to `error.MissingAttribute`
 /// (the caller's existing missing-attr handling — default value, `false`,
-/// user error — then applies unchanged). Everything else, including
-/// context strings, stays `error.TypeError` exactly as before.
+/// user error — then applies unchanged). A context string may not refer
+/// to the store; anything else is `error.TypeError`.
 pub fn selectNameId(self: *VM, name_val: Value) !InternId {
     if (name_val.isString()) return name_val.asInternId();
     if (name_val.isHeapString())
         return (try lookupNameId(self, name_val)) orelse error.MissingAttribute;
+    if (name_val.isContextString()) {
+        try rejectContext(self, name_val);
+        return stringTextInternId(self, name_val);
+    }
     return error.TypeError;
+}
+
+/// Nix's `forceStringNoCtx`: attribute names, regular expressions,
+/// versions and the like may not refer to the store.
+pub fn rejectContext(self: *VM, value: Value) !void {
+    if (!value.isContextString()) return;
+    const string = try self.heap.getContextString(value.asObjectId());
+    if (string.context.len() == 0) return;
+    var example: std.Io.Writer.Allocating = .init(self.allocator);
+    defer example.deinit();
+    try writeContextExample(self, string.context, &example.writer);
+    const message = try std.fmt.allocPrint(self.allocator, "the string '{s}' is not allowed to refer to a store path (such as '{s}')", .{
+        self.intern.get(string.text),
+        example.written(),
+    });
+    defer self.allocator.free(message);
+    try trace.setErrorMessage(self, message);
+    return error.StringContextNotAllowed;
+}
+
+/// The first element of a context the way Nix orders and prints them:
+/// plain paths, then whole derivations (`drv (deep)`), then outputs
+/// (`drv^out`).
+fn writeContextExample(self: *VM, context: heap_mod.AttrsView, writer: *std.Io.Writer) !void {
+    const Kind = enum { path, deep, built };
+    var best: ?struct { kind: Kind, name: []const u8, output: []const u8 } = null;
+    for (context.names, context.values) |name_id, descriptor| {
+        const name = self.intern.get(name_id);
+        const id = descriptor.asObjectId();
+        const candidates = [_]?Kind{
+            if (try self.heap.getAttrValueOpt(id, try self.intern.intern("path")) != null) .path else null,
+            if (try self.heap.getAttrValueOpt(id, try self.intern.intern("allOutputs")) != null) .deep else null,
+        };
+        for (candidates) |candidate| {
+            const kind = candidate orelse continue;
+            if (best == null or @intFromEnum(kind) < @intFromEnum(best.?.kind) or
+                (kind == best.?.kind and std.mem.lessThan(u8, name, best.?.name)))
+                best = .{ .kind = kind, .name = name, .output = "" };
+        }
+        const outputs = (try self.heap.getAttrValueOpt(id, try self.intern.intern("outputs"))) orelse continue;
+        if (!outputs.isList() or try self.heap.getListLen(outputs.asObjectId()) == 0) continue;
+        const output = self.intern.get((try self.heap.getListItem(outputs.asObjectId(), 0)).asInternId());
+        if (best == null or best.?.kind == .built and
+            (std.mem.lessThan(u8, name, best.?.name) or std.mem.eql(u8, name, best.?.name) and std.mem.lessThan(u8, output, best.?.output)))
+            best = .{ .kind = .built, .name = name, .output = output };
+    }
+    const example = best orelse return;
+    switch (example.kind) {
+        .path => try writer.writeAll(example.name),
+        .deep => try writer.print("{s} (deep)", .{example.name}),
+        .built => try writer.print("{s}^{s}", .{ example.name, example.output }),
+    }
+}
+
+/// A string (not a path) without context: Nix's `forceStringNoCtx`.
+pub fn noContextString(self: *VM, arg: Value) ![]const u8 {
+    const value = try force.forceValue(self, arg);
+    if (!isPlainString(value)) return trace.typeErrorExpected(self, "a string", value);
+    try rejectContext(self, value);
+    return stringBytes(self, value);
 }
 
 pub fn isPlainString(value: Value) bool {

@@ -302,6 +302,7 @@ fn readDerivationHeader(self: *VM, attrs_id: ObjectId) !DerivationHeader {
     const name_id = try self.intern.intern("name");
     const name_value = try vm_force.forceValue(self, try self.heap.getAttrValue(attrs_id, name_id));
     if (!isPlainString(name_value)) return error.TypeError;
+    try vm_strings.rejectContext(self, name_value);
     const drv_name_id = try strings.stringNameId(self, name_value);
     const drv_name = self.intern.get(drv_name_id);
     try validateDerivationName(self, drv_name);

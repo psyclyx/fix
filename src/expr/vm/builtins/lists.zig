@@ -107,6 +107,7 @@ pub fn builtinListToAttrs(self: *VM, arg: Value) !Value {
 
         const name_value = try vm_force.forceValue(self, try self.heap.getAttrValue(item_value.asObjectId(), name_id));
         if (!isPlainString(name_value)) return error.TypeError;
+        try vm_strings.rejectContext(self, name_value);
         // Constructive boundary: the name WILL exist, so heap-resident
         // text interns here.
         const name_intern = try vm_strings.stringNameId(self, name_value);
@@ -546,6 +547,7 @@ pub fn builtinGroupBy(self: *VM, fn_arg: Value, list_arg: Value) !Value {
         const item = try self.heap.getListItem(list_id, i);
         const key = try vm_force.forceValue(self, try vm_closures.callValue(self, func, item));
         if (!isPlainString(key)) return error.TypeError;
+        try vm_strings.rejectContext(self, key);
         // Constructive name boundary: groupBy keys become attr names.
         const key_id = try vm_strings.stringNameId(self, key);
         const index = (try group_idx.find(self.allocator, groups.items, key_id)) orelse blk: {
