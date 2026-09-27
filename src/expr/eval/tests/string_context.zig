@@ -81,3 +81,19 @@ test "a string with context orders against a plain string" {
     // A path still only orders against a path.
     try std.testing.expectError(error.TypeError, ev.evaluate(prelude ++ " s < /z"));
 }
+
+test "split keeps the context of a string it does not split" {
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+
+    const prelude =
+        \\let d = builtins.derivation { name = "pkg"; system = "x86_64-linux"; builder = "/bin/sh"; };
+        \\    s = "${d}";
+        \\in
+    ;
+    // Nix returns the argument itself when nothing matches...
+    try std.testing.expect((try ev.evaluate(prelude ++ " builtins.hasContext (builtins.head (builtins.split \"#\" s))")).asBool());
+    try std.testing.expectEqual(@as(i64, 1), (try ev.evaluate(prelude ++ " builtins.length (builtins.split \"#\" s)")).asInt());
+    // ...and builds context-free pieces around a match.
+    try std.testing.expect(!(try ev.evaluate(prelude ++ " builtins.hasContext (builtins.head (builtins.split \"/\" s))")).asBool());
+}

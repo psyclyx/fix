@@ -733,6 +733,9 @@ pub fn builtinSplit(self: *VM, regex_arg: Value, text_arg: Value) !Value {
         found.deinit(self.allocator);
     }
 
+    // Without a match Nix returns the argument itself, so its context
+    // survives; the pieces around a match never carry context.
+    if (out.items.len == 0) return Value.list(try self.heap.addList(&.{text_value}));
     try out.append(self.allocator, try vm_strings.makeString(self, text[cursor..]));
     return Value.list(try self.heap.addList(out.items));
 }
