@@ -97,7 +97,7 @@ fn fetchTreeImpl(self: *VM, arg: Value, fetch_tree_defaults: bool) !Value {
     if (attrs.isPath()) {
         const path = self.intern.get(attrs.asInternId());
         if (try adoptStorePath(self, path, null, fetch.sourceLastModified(self, path))) |adopted| return adopted;
-        const out = try ingestFetchedTree(self, path, path_ops.baseName(path), "", null);
+        const out = try ingestFetchedTree(self, path, "source", "", null);
         defer out.deinit(self.allocator);
         return pathTreeValue(self, out.out_path, out.nar_hash, fetch.sourceLastModified(self, path));
     }
@@ -126,7 +126,7 @@ fn fetchTreeImpl(self: *VM, arg: Value, fetch_tree_defaults: bool) !Value {
         const locked_hash = try optionalStringAttr(self, attrs_id, "narHash");
         defer if (locked_hash) |h| self.allocator.free(h);
         if (try adoptStorePath(self, path, locked_hash, last_modified)) |adopted| return adopted;
-        const out = try ingestFetchedTree(self, path, path_ops.baseName(path), "", null);
+        const out = try ingestFetchedTree(self, path, "source", "", null);
         defer out.deinit(self.allocator);
         return pathTreeValue(self, out.out_path, out.nar_hash, last_modified);
     }
@@ -1146,12 +1146,10 @@ fn flakeInputFromStore(self: *VM, attrs: Value) !?Value {
         const lm = (try optionalIntAttr(self, id, "lastModified")) orelse 0;
         if (try adoptStorePath(self, p, nar_hash, lm)) |adopted| return adopted;
     }
+    if (is_path and path_attr == null) return null;
     const name_attr = if (!is_path) (try optionalStringAttr(self, id, "name")) else null;
     defer if (name_attr) |n| self.allocator.free(n);
-    const name = if (is_path)
-        (if (path_attr) |p| path_ops.baseName(p) else return null)
-    else
-        (name_attr orelse "source");
+    const name = name_attr orelse "source";
 
     const hex = derivation.hashToBase16(self.allocator, "sha256", nar_hash) catch return null;
     defer self.allocator.free(hex);

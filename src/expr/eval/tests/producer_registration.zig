@@ -498,3 +498,21 @@ test "store-writing mode defers writes; ensureClosure materializes the drv closu
         try expectEffect(fixture.fake, recipes - 1, .text, storePathSubject(drv_path), records[0].drv_aterm, records[0].drv_text_references);
     } else return error.MissingRecipeInspectionApi;
 }
+
+test "fetchTree names a path tree 'source', like Nix" {
+    var fixture = try Fixture.init(std.testing.allocator, true);
+    defer fixture.deinit();
+    fixture.ev.policy.fetch_tree_enabled = true;
+    try fixture.tmp.dir.createDir(std.testing.io, "tree", .default_dir);
+    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "tree/f", .data = "x\n" });
+    const tree = try fixture.tmp.dir.realPathFileAlloc(std.testing.io, "tree", std.testing.allocator);
+    defer std.testing.allocator.free(tree);
+
+    const source = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "let t = \"{s}\"; in (builtins.fetchTree {{ type = \"path\"; path = t; }}).outPath == builtins.path {{ path = /. + t; name = \"source\"; }}",
+        .{tree},
+    );
+    defer std.testing.allocator.free(source);
+    try std.testing.expect((try fixture.ev.forceValue(try fixture.ev.evaluate(source))).asBool());
+}
