@@ -393,7 +393,9 @@ fn floatToI64Safely(f: f64) !i64 {
     if (std.math.isNan(f) or std.math.isInf(f)) return error.NumericConversion;
     const upper_exclusive: f64 = 0x1.0p63;
     const lower_inclusive: f64 = -0x1.0p63;
-    if (f < lower_inclusive or f >= upper_exclusive) return std.math.minInt(i64);
+    // Nix < 2.29 returned whatever the (undefined) conversion gave, on x86
+    // i64_min; Nix 2.29+ and Lix raise an error, and so do we.
+    if (f < lower_inclusive or f >= upper_exclusive) return error.NumericConversion;
     return @intFromFloat(f);
 }
 
@@ -459,22 +461,17 @@ test "float division by zero raises (Nix parity)" {
     try std.testing.expectError(error.DivisionByZero, div(&heap, Value.int(1), Value.float(0.0)));
 }
 
-test "floor/ceil reject NaN and infinities, saturate huge finite floats to i64_min (Nix parity)" {
+test "floor/ceil reject NaN, infinities and results outside the integer range (Nix parity)" {
     var heap = try ObjectHeap.init(std.testing.allocator, 1);
     defer heap.deinit();
     try std.testing.expectError(error.NumericConversion, floor(&heap, Value.float(std.math.nan(f64))));
     try std.testing.expectError(error.NumericConversion, ceil(&heap, Value.float(std.math.nan(f64))));
     try std.testing.expectError(error.NumericConversion, floor(&heap, Value.float(std.math.inf(f64))));
     try std.testing.expectError(error.NumericConversion, ceil(&heap, Value.float(-std.math.inf(f64))));
-    // Out-of-range finite floats saturate to i64_min (Nix C++ inherits the
-    // x86 cvttsd2si "indefinite integer" behaviour on overflow).
-    const huge_pos = try floor(&heap, Value.float(1.0e100));
-    try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), int_mod.get(huge_pos, &heap));
-    const huge_neg = try ceil(&heap, Value.float(-1.0e100));
-    try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), int_mod.get(huge_neg, &heap));
-    // The boundary: exactly 2^63 saturates; -2^63 (== i64_min) succeeds.
-    const boundary_pos = try floor(&heap, Value.float(0x1.0p63));
-    try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), int_mod.get(boundary_pos, &heap));
+    try std.testing.expectError(error.NumericConversion, floor(&heap, Value.float(1.0e100)));
+    try std.testing.expectError(error.NumericConversion, ceil(&heap, Value.float(-1.0e100)));
+    // The boundary: 2^63 is out of range; -2^63 (== i64_min) is not.
+    try std.testing.expectError(error.NumericConversion, floor(&heap, Value.float(0x1.0p63)));
     const boundary_neg = try floor(&heap, Value.float(-0x1.0p63));
     try std.testing.expectEqual(@as(i64, std.math.minInt(i64)), int_mod.get(boundary_neg, &heap));
 }
