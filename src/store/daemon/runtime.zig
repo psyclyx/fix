@@ -83,6 +83,7 @@ pub const DaemonRuntime = struct {
             .ctx = &self.daemon_config,
             .open = openDaemon,
             .close = closeDaemon,
+            .usable = usableDaemon,
         }, self.pool_workers);
         self.pool.start() catch |err| {
             self.pool.deinit();
@@ -102,6 +103,11 @@ pub const DaemonRuntime = struct {
             if (config.options) |options| try daemon.setOptions(options);
         }
         return daemon;
+    }
+
+    fn usableDaemon(_: *anyopaque, raw: *anyopaque) bool {
+        const daemon: *rstore.DaemonStore = @ptrCast(@alignCast(raw));
+        return daemon.usable();
     }
 
     fn closeDaemon(_: *anyopaque, raw: *anyopaque) void {
