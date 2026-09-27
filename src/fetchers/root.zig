@@ -14,6 +14,7 @@ pub const nar = store.nar;
 pub const http_transport = @import("http_transport.zig");
 pub const git_transport = @import("git_transport.zig");
 pub const url = @import("url.zig");
+pub const flakeref = @import("flakeref.zig");
 
 pub const FileCache = store.FileCache;
 pub const FetchService = fetch_cache.FetchCache;
@@ -31,4 +32,5 @@ test {
     _ = http_transport;
     _ = git_transport;
     _ = url;
+    _ = flakeref;
 }

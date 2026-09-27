@@ -102,6 +102,32 @@ pub fn snapshotLocal(
     return result;
 }
 
+/// Nix's `isLegalRefName`: libgit2 accepts `name` as a reference, branch
+/// or tag name, and it is neither `@` nor contains DEL (which libgit2 lets
+/// through). libgit2 takes a one-level reference name only in capitals, but
+/// takes any name as a branch or a tag unless it starts with `-`, so its
+/// three checks come down to valid components and no leading `-` on a
+/// one-level name.
+pub fn isLegalRefName(name: []const u8) bool {
+    if (name.len == 0 or std.mem.eql(u8, name, "@")) return false;
+    if (name[0] == '-' and std.mem.indexOfScalar(u8, name, '/') == null) return false;
+    // No trailing `.`, and (since that ends in an empty component) no
+    // trailing `/`.
+    if (name[name.len - 1] == '.') return false;
+    var components = std.mem.splitScalar(u8, name, '/');
+    while (components.next()) |component| {
+        if (component.len == 0 or component[0] == '.') return false;
+        if (std.mem.endsWith(u8, component, ".lock")) return false;
+        if (std.mem.indexOf(u8, component, "..") != null) return false;
+        if (std.mem.indexOf(u8, component, "@{") != null) return false;
+        for (component) |byte| switch (byte) {
+            0...' ', 0x7f, '~', '^', ':', '\\', '?', '[', '*' => return false,
+            else => {},
+        };
+    }
+    return true;
+}
+
 /// Clone or refresh a worktree, resolve the requested commit, then cleanly
 /// check it out. `refresh=false` still opens and validates the existing cache.
 pub fn materialize(
@@ -1285,5 +1311,15 @@ test "snapshots keep relative symlinks, in a work tree and at a pinned revision"
             const length = try tmp.dir.readLink(testing.io, link_path, &buffer);
             try testing.expectEqualStrings(link[1], buffer[0..length]);
         }
+    }
+}
+
+test "isLegalRefName follows libgit2, minus @ and DEL" {
+    const testing = std.testing;
+    for ([_][]const u8{ "master", "release/24.05", "refs/heads/main", "HEAD", "branch#", "a+b", "-a/b", "FOO/bar", "@/a" }) |name| {
+        try testing.expect(isLegalRefName(name));
+    }
+    for ([_][]const u8{ "@", "a..b", "a b", "a~b", "a:b", ".hidden", "trailing/", "x.lock", "a\x7fb", "", "-a", "a//b", "/a", "a.", "a@{b", "a*", "a/.b", "a.lock/b" }) |name| {
+        try testing.expect(!isLegalRefName(name));
     }
 }

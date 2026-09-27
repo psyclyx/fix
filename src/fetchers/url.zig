@@ -454,14 +454,22 @@ pub fn decodeQuery(allocator: std.mem.Allocator, encoded: []const u8, lenient: b
     return query;
 }
 
-/// Nix's `pathToUrlPath`: an absolute path starts with an empty segment,
-/// and one ending in `/` ends with one.
+/// Nix's `pathToUrlPath`: an absolute path starts with an empty segment.
+/// A trailing `/` gives two more: one from iterating the `std::filesystem`
+/// path (which yields a final empty component) and one for its empty file
+/// name, so `path:/a/` prints as `path:/a//`.
 pub fn pathToUrlPath(allocator: std.mem.Allocator, path: []const u8) ![]const []const u8 {
     var segments: std.ArrayListUnmanaged([]const u8) = .empty;
     if (std.mem.startsWith(u8, path, "/")) try segments.append(allocator, "");
     var components = std.mem.tokenizeScalar(u8, path, '/');
-    while (components.next()) |component| try segments.append(allocator, component);
-    if (path.len == 0 or path[path.len - 1] == '/') try segments.append(allocator, "");
+    var any = false;
+    while (components.next()) |component| {
+        try segments.append(allocator, component);
+        any = true;
+    }
+    const trailing_slash = path.len != 0 and path[path.len - 1] == '/';
+    if (trailing_slash and any) try segments.append(allocator, "");
+    if (path.len == 0 or trailing_slash) try segments.append(allocator, "");
     return segments.toOwnedSlice(allocator);
 }
 
@@ -624,7 +632,7 @@ test "paths convert to URL paths and back as in Nix" {
     const a = arena.allocator();
     const cases = [_]struct { []const u8, []const []const u8, []const u8 }{
         .{ "/foo bar/baz", &.{ "", "foo bar", "baz" }, "/foo bar/baz" },
-        .{ "/foo//bar/", &.{ "", "foo", "bar", "" }, "/foo/bar/" },
+        .{ "/foo//bar/", &.{ "", "foo", "bar", "", "" }, "/foo/bar/" },
         .{ "/", &.{ "", "" }, "/" },
         .{ "rel/x", &.{ "rel", "x" }, "rel/x" },
     };

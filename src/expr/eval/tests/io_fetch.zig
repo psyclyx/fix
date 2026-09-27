@@ -676,16 +676,19 @@ test "parseFlakeRef handles github refs without a branch and bare absolute paths
 
 test "parseFlakeRef rejects malformed refs" {
     try std.testing.expectError(error.InvalidFlakeRef, renderWithFlakes("builtins.parseFlakeRef \"github:NixOS\""));
-    try std.testing.expectError(error.InvalidFlakeRef, renderWithFlakes("builtins.parseFlakeRef \"relative/path\""));
+    try std.testing.expectError(error.InvalidFlakeRef, renderWithFlakes("builtins.parseFlakeRef \"./relative/path\""));
+    try std.testing.expectError(error.InvalidFlakeRef, renderWithFlakes("builtins.parseFlakeRef \"github:a/b#fragment\""));
+    try std.testing.expectError(error.InvalidFlakeRef, renderWithFlakes("builtins.parseFlakeRef \"github:a/b?unknown=1\""));
     try std.testing.expectError(error.InvalidFlakeRef, renderWithFlakes("builtins.parseFlakeRef \"\""));
 }
 
 test "flakeRefToString serializes each ref type and its query params" {
     const cases = [_]struct { expr: []const u8, want: []const u8 }{
         .{ .expr = "{ type = \"path\"; path = \"/tmp/source\"; }", .want = "\"path:/tmp/source\"" },
-        .{ .expr = "{ type = \"path\"; path = \"/tmp/source\"; rev = \"abc\"; narHash = \"sha256-test\"; }", .want = "\"path:/tmp/source?rev=abc&narHash=sha256-test\"" },
-        // `rev` is preferred over `ref` in the forge path segment (pin fidelity).
-        .{ .expr = "{ type = \"github\"; owner = \"NixOS\"; repo = \"nixpkgs\"; rev = \"deadbeef\"; ref = \"main\"; }", .want = "\"github:NixOS/nixpkgs/deadbeef\"" },
+        // A path's other attributes are its query, sorted by name.
+        .{ .expr = "{ type = \"path\"; path = \"/tmp/source\"; rev = \"abc\"; narHash = \"sha256-test\"; }", .want = "\"path:/tmp/source?narHash=sha256-test&rev=abc\"" },
+        .{ .expr = "{ type = \"github\"; owner = \"NixOS\"; repo = \"nixpkgs\"; rev = \"0000000000000000000000000000000000000000\"; }", .want = "\"github:NixOS/nixpkgs/0000000000000000000000000000000000000000\"" },
+        .{ .expr = "{ type = \"indirect\"; id = \"nixpkgs\"; ref = \"main\"; }", .want = "\"flake:nixpkgs/main\"" },
         .{ .expr = "{ type = \"github\"; owner = \"NixOS\"; repo = \"nixpkgs\"; ref = \"main\"; dir = \"sub\"; }", .want = "\"github:NixOS/nixpkgs/main?dir=sub\"" },
         .{ .expr = "{ type = \"gitlab\"; owner = \"foo\"; repo = \"bar\"; }", .want = "\"gitlab:foo/bar\"" },
         .{ .expr = "{ type = \"git\"; url = \"https://example.com/repo\"; ref = \"main\"; }", .want = "\"git+https://example.com/repo?ref=main\"" },
@@ -701,8 +704,13 @@ test "flakeRefToString serializes each ref type and its query params" {
     }
 
     try std.testing.expectError(
-        error.MissingAttribute,
+        error.InvalidFlakeRef,
         renderWithFlakes("builtins.flakeRefToString { type = \"github\"; owner = \"NixOS\"; }"),
+    );
+    // A forge pins a branch/tag or a commit, not both.
+    try std.testing.expectError(
+        error.InvalidFlakeRef,
+        renderWithFlakes("builtins.flakeRefToString { type = \"github\"; owner = \"NixOS\"; repo = \"nixpkgs\"; rev = \"0000000000000000000000000000000000000000\"; ref = \"main\"; }"),
     );
     try std.testing.expectError(error.TypeError, renderWithFlakes("builtins.flakeRefToString \"github:NixOS/nixpkgs\""));
 }

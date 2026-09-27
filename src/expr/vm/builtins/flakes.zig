@@ -8,6 +8,7 @@ const FetchService = @import("fetchers").FetchService;
 const derivation = @import("store").derivation;
 const path_ops = @import("runtime").paths;
 const flake_ref = @import("flake_ref.zig");
+const flake_registry = @import("flake_registry.zig");
 const shared = @import("shared.zig");
 const purity = @import("purity.zig");
 const attrsets = @import("attrsets.zig");
@@ -85,6 +86,63 @@ fn adoptStorePath(self: *VM, path: []const u8, locked_nar_hash: ?[]const u8, las
     return try pathTreeValue(self, path, locked_nar_hash orelse "", last_modified);
 }
 
+/// An indirect flake reference (`nixpkgs`, `flake:nixpkgs/branch`)
+/// resolved through the flake registries, as Nix does before fetching one:
+/// the registry's target, with the reference's own `ref` or `rev` (a forge
+/// takes one or the other) and `dir` applied. Any other reference is
+/// returned as it is.
+pub fn resolveIndirect(self: *VM, ref_attrs: Value) !Value {
+    const id_attrs = ref_attrs.asObjectId();
+    const type_value = try requiredStringAttr(self, id_attrs, "type");
+    defer self.allocator.free(type_value);
+    if (!std.mem.eql(u8, type_value, "indirect")) return ref_attrs;
+
+    const gc_roots = vm_force.rootsBegin(self);
+    defer vm_force.rootsEnd(self, gc_roots);
+    vm_force.rootKeep(self, ref_attrs);
+    const id = try requiredStringAttr(self, id_attrs, "id");
+    defer self.allocator.free(id);
+    const target = (try flake_registry.resolve(self, id)) orelse {
+        const message = try std.fmt.allocPrint(self.allocator, "cannot find flake 'flake:{s}' in the flake registries", .{id});
+        defer self.allocator.free(message);
+        try vm_trace.setErrorMessage(self, message);
+        return error.InvalidFlakeRef;
+    };
+    defer self.allocator.free(target);
+    const resolved = try builtinParseFlakeRef(self, Value.string(try self.intern.intern(target)));
+    vm_force.rootKeep(self, resolved);
+
+    const overrides = [_][]const u8{ "ref", "rev", "dir" };
+    var values: [overrides.len]?Value = .{ null, null, null };
+    var any = false;
+    for (overrides, &values) |name, *slot| {
+        slot.* = try self.heap.getAttrValueOpt(id_attrs, try self.intern.intern(name));
+        if (slot.* != null) any = true;
+    }
+    if (!any) return resolved;
+    const resolved_type = try requiredStringAttr(self, resolved.asObjectId(), "type");
+    defer self.allocator.free(resolved_type);
+    const forge = std.mem.eql(u8, resolved_type, "github") or std.mem.eql(u8, resolved_type, "gitlab") or std.mem.eql(u8, resolved_type, "sourcehut");
+
+    var entries: std.ArrayListUnmanaged(heap_mod.AttrEntry) = .empty;
+    defer entries.deinit(self.allocator);
+    const view = try self.heap.materializeAttrs(resolved.asObjectId());
+    for (view.names, view.values) |name_id, value| {
+        const name = self.intern.get(name_id);
+        const overridden = for (overrides, values) |override, v| {
+            if (v != null and std.mem.eql(u8, name, override)) break true;
+        } else false;
+        // A forge pins either a branch/tag or a commit.
+        const superseded = forge and ((std.mem.eql(u8, name, "ref") and values[1] != null) or
+            (std.mem.eql(u8, name, "rev") and values[0] != null));
+        if (!overridden and !superseded) try entries.append(self.allocator, .{ .name = name_id, .value = value });
+    }
+    for (overrides, values) |name, v| {
+        if (v) |value| try entries.append(self.allocator, .{ .name = try self.intern.intern(name), .value = value });
+    }
+    return Value.attrs(try self.heap.addAttrs(entries.items));
+}
+
 pub fn builtinFetchTree(self: *VM, arg: Value) !Value {
     return fetchTreeImpl(self, arg, false);
 }
@@ -116,6 +174,10 @@ fn fetchTreeImpl(self: *VM, arg: Value, fetch_tree_defaults: bool) !Value {
     const attrs_id = attrs.asObjectId();
     const type_value = try requiredStringAttr(self, attrs_id, "type");
     defer self.allocator.free(type_value);
+
+    if (std.mem.eql(u8, type_value, "indirect")) {
+        return fetchTreeImpl(self, try resolveIndirect(self, attrs), fetch_tree_defaults);
+    }
 
     if (std.mem.eql(u8, type_value, "path")) {
         const path = try dupPathAttr(self, attrs_id, "path");
@@ -186,7 +248,8 @@ fn fetchTreeImpl(self: *VM, arg: Value, fetch_tree_defaults: bool) !Value {
         return githubTreeValue(self, out.out_path, out.nar_hash, spec.rev, result.forge_metadata, (try optionalIntAttr(self, attrs_id, "lastModified")) orelse 0);
     }
 
-    if (std.mem.eql(u8, type_value, "mercurial")) {
+    // Nix calls the scheme `hg`; `mercurial` is accepted too.
+    if (std.mem.eql(u8, type_value, "hg") or std.mem.eql(u8, type_value, "mercurial")) {
         const spec = try fetchMercurialSpecFromAttrs(self, attrs_id);
         defer spec.deinit(self.allocator);
         const result = try offloadFetch(self, .mercurial, spec.borrowed());
@@ -659,7 +722,11 @@ fn lockInput(gen: *LockGen, name: []const u8, decl: Value, prefix: []const []con
     if (try declFollows(self, eff.decl)) |target|
         return .{ .name = name, .follows = try followsPath(gen, eff.declared_at, target) };
 
-    const ref_attrs = try parseInputRef(self, eff.decl);
+    const declared_ref = try parseInputRef(self, eff.decl);
+    vm_force.rootKeep(self, declared_ref);
+    // An indirect input is locked to what the registry resolves it to; the
+    // lock's `original` keeps it as declared.
+    const ref_attrs = try resolveIndirect(self, declared_ref);
     vm_force.rootKeep(self, ref_attrs);
     // The input's flakeness comes from its own declaration even when the ref
     // is overridden (Nix: overrides don't change `flake = false`).
@@ -674,7 +741,7 @@ fn lockInput(gen: *LockGen, name: []const u8, decl: Value, prefix: []const []con
     try gen.nodes.append(gen.arena, .{
         .key = key,
         .locked = try lockedJson(gen, ref_attrs, src_info),
-        .original = try refAttrsToJson(gen, ref_attrs),
+        .original = try refAttrsToJson(gen, declared_ref),
         .is_flake = is_flake,
     });
 
