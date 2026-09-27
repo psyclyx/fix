@@ -10,6 +10,7 @@ const ObjectId = types.ObjectId;
 const InternId = types.InternId;
 const heap_mod = @import("runtime").heap;
 const int_mod = @import("runtime").int;
+const numeric = @import("runtime").numeric;
 const version = @import("runtime").version;
 const regex = @import("../../support.zig").regex;
 const toml = @import("../../support.zig").toml;
@@ -303,7 +304,11 @@ fn writeXmlValue(
         .bool_true => try writer.writeAll("<bool value=\"true\" />\n"),
         .int => try writer.print("<int value=\"{}\" />\n", .{forced.asInt()}),
         .boxed_int => try writer.print("<int value=\"{}\" />\n", .{try self.heap.getBoxedInt(forced.asObjectId())}),
-        .float => try writer.print("<float value=\"{d}\" />\n", .{forced.asFloat()}),
+        .float => {
+            // Nix streams the double with the default precision: `%g`.
+            var buf: [numeric.g_max_len]u8 = undefined;
+            try writer.print("<float value=\"{s}\" />\n", .{numeric.formatG(&buf, forced.asFloat(), 6)});
+        },
         .string => {
             try writer.writeAll("<string value=\"");
             try writeXmlEscaped(writer, self.intern.get(forced.asInternId()));
@@ -333,7 +338,10 @@ fn writeXmlValue(
         .list => try writeXmlList(self, writer, forced.asObjectId(), depth, context, mode, drvs_seen),
         .attrs => try writeXmlAttrs(self, writer, forced.asObjectId(), depth, context, mode, drvs_seen),
         .closure => try writeXmlFunction(self, writer, forced, depth),
-        .builtin, .builtin_closure, .partial_app => try writer.writeAll("<function />\n"),
+        // Nix only describes lambdas; a primop, applied or not, is
+        // `<unevaluated />`.
+        .builtin, .builtin_closure => try writer.writeAll("<unevaluated />\n"),
+        .partial_app => try writer.writeAll("<function />\n"),
         .thunk => unreachable,
     }
 }

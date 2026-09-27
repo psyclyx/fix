@@ -324,6 +324,18 @@ test "toXML escapes exactly the characters Nix escapes" {
     try std.testing.expect(std.mem.indexOf(u8, name, "<attr name=\\\"a&lt;b\\\">") != null);
 }
 
+test "toXML prints floats with %g and primops as unevaluated, as Nix does" {
+    const floats = try renderForTest("builtins.toXML [ 123456789.0 0.1 1.0e-5 ]");
+    defer std.testing.allocator.free(floats);
+    try std.testing.expect(std.mem.indexOf(u8, floats, "<float value=\\\"1.23457e+08\\\" />") != null);
+    try std.testing.expect(std.mem.indexOf(u8, floats, "<float value=\\\"0.1\\\" />") != null);
+    try std.testing.expect(std.mem.indexOf(u8, floats, "<float value=\\\"1e-05\\\" />") != null);
+
+    const primops = try renderForTest("builtins.toXML [ builtins.add (builtins.add 1) ]");
+    defer std.testing.allocator.free(primops);
+    try std.testing.expect(std.mem.indexOf(u8, primops, "<list>\\n    <unevaluated />\\n    <unevaluated />\\n  </list>") != null);
+}
+
 // The XML writer recurses on the native stack and streams as it goes, so a
 // cyclic value used to fault (`builtins.toXML`) or write output forever
 // (`--xml`). Each level now counts against max-call-depth, as Nix bounds it.
