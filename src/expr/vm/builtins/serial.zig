@@ -722,24 +722,43 @@ pub fn builtinSplitVersion(self: *VM, arg: Value) !Value {
 /// else compiled locally into `owned` (standalone test VMs), which the
 /// caller deinits via `defer`.
 fn resolvePattern(self: *VM, pattern_id: InternId, owned: *?regex.Pattern) !*const regex.Pattern {
-    if (self.regexes) |cache| return cache.get(pattern_id, self.intern.get(pattern_id));
-    owned.* = try regex.Pattern.compile(self.allocator, self.intern.get(pattern_id));
-    return &owned.*.?;
+    const source = self.intern.get(pattern_id);
+    const compiled = if (self.regexes) |cache|
+        cache.get(pattern_id, source)
+    else if (regex.Pattern.compile(self.allocator, source)) |pattern| blk: {
+        owned.* = pattern;
+        break :blk &owned.*.?;
+    } else |err| err;
+    return compiled catch |err| {
+        const message = switch (err) {
+            error.InvalidRegex => try std.fmt.allocPrint(self.allocator, "invalid regular expression '{s}'", .{source}),
+            error.RegexTooLarge => try std.fmt.allocPrint(self.allocator, "memory limit exceeded by regular expression '{s}'", .{source}),
+            else => return err,
+        };
+        defer self.allocator.free(message);
+        try vm_trace.setErrorMessage(self, message);
+        return err;
+    };
 }
 
-pub fn builtinMatch(self: *VM, regex_arg: Value, text_arg: Value) !Value {
-    const pattern_value = try vm_force.forceValue(self, regex_arg);
-    const text_value = try vm_force.forceValue(self, text_arg);
-    if (!isPlainString(pattern_value) or !isPlainString(text_value)) return error.TypeError;
+/// The pattern argument of `match` and `split`, compiled before the
+/// string is forced, as Nix does.
+fn patternArg(self: *VM, arg: Value, owned: *?regex.Pattern) !*const regex.Pattern {
+    const pattern_value = try vm_force.forceValue(self, arg);
+    if (!isPlainString(pattern_value)) return vm_trace.typeErrorExpected(self, "a string", pattern_value);
     try vm_strings.rejectContext(self, pattern_value);
     // The PatternCache is keyed by intern id, so a heap-resident pattern
     // interns here (patterns are short and bounded in number).
-    const pattern_id = try vm_strings.stringNameId(self, pattern_value);
-    const text = try vm_strings.stringBytes(self, text_value);
+    return resolvePattern(self, try vm_strings.stringNameId(self, pattern_value), owned);
+}
 
+pub fn builtinMatch(self: *VM, regex_arg: Value, text_arg: Value) !Value {
     var owned: ?regex.Pattern = null;
     defer if (owned) |*p| p.deinit();
-    const pattern = try resolvePattern(self, pattern_id, &owned);
+    const pattern = try patternArg(self, regex_arg, &owned);
+    const text_value = try vm_force.forceValue(self, text_arg);
+    if (!isPlainString(text_value)) return vm_trace.typeErrorExpected(self, "a string", text_value);
+    const text = try vm_strings.stringBytes(self, text_value);
 
     const matched = (try pattern.matchFull(self.allocator, text)) orelse return Value.null_val;
     defer matched.deinit(self.allocator);
@@ -747,37 +766,24 @@ pub fn builtinMatch(self: *VM, regex_arg: Value, text_arg: Value) !Value {
 }
 
 pub fn builtinSplit(self: *VM, regex_arg: Value, text_arg: Value) !Value {
-    const pattern_value = try vm_force.forceValue(self, regex_arg);
-    const text_value = try vm_force.forceValue(self, text_arg);
-    if (!isPlainString(pattern_value) or !isPlainString(text_value)) return error.TypeError;
-    try vm_strings.rejectContext(self, pattern_value);
-    const pattern_id = try vm_strings.stringNameId(self, pattern_value);
-    const text = try vm_strings.stringBytes(self, text_value);
-
     var owned: ?regex.Pattern = null;
     defer if (owned) |*p| p.deinit();
-    const pattern = try resolvePattern(self, pattern_id, &owned);
+    const pattern = try patternArg(self, regex_arg, &owned);
+    const text_value = try vm_force.forceValue(self, text_arg);
+    if (!isPlainString(text_value)) return vm_trace.typeErrorExpected(self, "a string", text_value);
+    const text = try vm_strings.stringBytes(self, text_value);
 
     var out: std.ArrayListUnmanaged(Value) = .empty;
     defer out.deinit(self.allocator);
 
+    // Each match is preceded by the text since the previous one.
     var cursor: usize = 0;
-    var search_start: usize = 0;
-    while (search_start <= text.len) {
-        const found = (try pattern.find(self.allocator, text, search_start)) orelse break;
-        errdefer found.deinit(self.allocator);
-
+    var matches = pattern.iterator(text);
+    while (try matches.next(self.allocator)) |found| {
+        defer found.deinit(self.allocator);
         try out.append(self.allocator, try vm_strings.makeString(self, text[cursor..found.start]));
         try out.append(self.allocator, try regexCapturesValue(self, found.captures));
-
         cursor = found.end;
-        // A zero-length match must not advance `cursor`, only the next search
-        // position: the character stepped over belongs to the FOLLOWING
-        // separator's prefix. Emitting it as an element of its own would add a
-        // string where the 2n+1 alternation demands a capture list, which every
-        // consumer indexing `split` by parity relies on.
-        search_start = if (found.start == found.end) found.end + 1 else found.end;
-        found.deinit(self.allocator);
     }
 
     // Without a match Nix returns the argument itself, so its context
