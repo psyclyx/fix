@@ -94,8 +94,8 @@ const memo_size = thread_caches.memo_size;
 /// into a registry the stop-the-world collector walks.
 /// Register this worker's thread-local GC caches (thunk memo + attr cache)
 /// so the collector can mark them. Called once per worker before it runs.
-pub fn gcRegisterWorkerCaches(worker_id: u8) void {
-    thread_caches.register(worker_id);
+pub fn gcRegisterWorkerCaches(gpa: std.mem.Allocator, worker_id: u8) void {
+    thread_caches.register(gpa, worker_id);
 }
 
 /// Remove cache pointers before a helper thread exits; its TLS storage becomes
@@ -728,7 +728,7 @@ fn forceClaimedThunk(self: *VM, thunk: *Thunk, thunk_id: types.ObjectId, real_de
         // The dup census (and especially its structural-hash variant) costs
         // real cycles per resolve INSIDE spans other counters attribute —
         // opt-in per run so plain prof profiles stay clean.
-        if (dupCensusEnabled() and self.workerId() == 0 and thunk.targetKind() == .bytecode) {
+        if (self.dup_census and self.workerId() == 0 and thunk.targetKind() == .bytecode) {
             const b = &thunk.payload.target.bytecode;
             var h = std.hash.Wyhash.init(0x1e35_a7bd);
             for (b.upvalues()) |v| h.update(std.mem.asBytes(&v.bits));
@@ -804,7 +804,7 @@ fn forceClaimedThunk(self: *VM, thunk: *Thunk, thunk_id: types.ObjectId, real_de
             }
         }
         if (self.effect_epoch == effect_epoch) {
-            thread_caches.get().thunk_memo[key.idx] = .{
+            thread_caches.get(self.allocator).thunk_memo[key.idx] = .{
                 .token = self.heap.token,
                 .chunk = key.chunk,
                 .count = key.count,
@@ -884,7 +884,7 @@ fn reuseMemoizedThunk(
     key: MemoKey,
     demand: bool,
 ) ?Value {
-    const slot = &thread_caches.get().thunk_memo[key.idx];
+    const slot = &thread_caches.get(self.allocator).thunk_memo[key.idx];
     if (comptime prof.enabled) {
         if (self.workerId() == 0) prof_census.memo_probes += 1;
     }
@@ -900,14 +900,6 @@ fn reuseMemoizedThunk(
     recordResolve(self, thunk_id, slot.value);
     if (demand) thunk.markDemanded();
     return slot.value;
-}
-
-var dup_census_state: u8 = 0; // 0 unknown, 1 on, 2 off
-fn dupCensusEnabled() bool {
-    if (dup_census_state == 0) {
-        dup_census_state = if (std.c.getenv("FIX_PROF_DUP") != null) 1 else 2;
-    }
-    return dup_census_state == 1;
 }
 
 /// Census-only (`-Dprof-main`): depth-limited structural hash of a value.

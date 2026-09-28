@@ -410,7 +410,7 @@ pub const Worker = struct {
     /// Helper main loop. Drains until shutdown.
     pub fn run(self: *Worker) void {
         worker_id_mod.set(self.worker_id, true);
-        vm_force.gcRegisterWorkerCaches(self.worker_id);
+        vm_force.gcRegisterWorkerCaches(self.allocator, self.worker_id);
         defer vm_force.gcUnregisterWorkerCaches(self.worker_id);
         while (!self.shouldStop()) {
             self.gcSafepoint();
@@ -438,7 +438,7 @@ pub const Worker = struct {
         arg: *anyopaque,
     ) !void {
         worker_id_mod.set(self.worker_id, true);
-        vm_force.gcRegisterWorkerCaches(self.worker_id);
+        vm_force.gcRegisterWorkerCaches(self.allocator, self.worker_id);
         // Each top-level entry begins able to start background work.
         self.scheduler.setSuppressBackground(false);
         const tc: u64 = if (comptime census_on) fiber_mod.censusNow() else 0;
@@ -488,7 +488,7 @@ pub const Worker = struct {
     pub fn runTopLevels(self: *Worker, entries: []const TopLevelEntry) !void {
         if (entries.len == 0) return;
         worker_id_mod.set(self.worker_id, true);
-        vm_force.gcRegisterWorkerCaches(self.worker_id);
+        vm_force.gcRegisterWorkerCaches(self.allocator, self.worker_id);
         self.scheduler.setSuppressBackground(false);
 
         var completed: std.atomic.Value(usize) = .init(0);

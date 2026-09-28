@@ -37,21 +37,21 @@ const format_version = common.format_version;
 const checksum_end = common.checksum_end;
 const checksum_seed = common.checksum_seed;
 
-fn mapStr(idx: u32, strtab: []const types.InternId) Error!types.InternId {
-    if (idx >= strtab.len) return corruptAt(@src());
+fn mapStr(idx: u32, strtab: []const types.InternId, debug: bool) Error!types.InternId {
+    if (idx >= strtab.len) return corruptAt(@src(), debug);
     return strtab[idx];
 }
 
-fn mapName(biased: u32, name_table: []const NameId) Error!NameId {
+fn mapName(biased: u32, name_table: []const NameId, debug: bool) Error!NameId {
     if (biased == 0) return root_name_id;
     const idx = biased - 1;
-    if (idx >= name_table.len) return corruptAt(@src());
+    if (idx >= name_table.len) return corruptAt(@src(), debug);
     return name_table[idx];
 }
 
 fn readSpan(r: *Reader, strtab: []const types.InternId) Error!Chunk.SourceSpan {
     const has_file = try r.u8_();
-    const file: ?types.InternId = if (has_file != 0) try mapStr(try r.u32_(), strtab) else null;
+    const file: ?types.InternId = if (has_file != 0) try mapStr(try r.u32_(), strtab, r.debug) else null;
     const offset = try r.u32_();
     const len = try r.u32_();
     const line = try r.u32_();
@@ -65,8 +65,8 @@ fn readOptSpan(r: *Reader, strtab: []const types.InternId) Error!?Chunk.SourceSp
 }
 
 fn readAttrPosEntry(r: *Reader, strtab: []const types.InternId) Error!AttrPosEntry {
-    const name = try mapStr(try r.u32_(), strtab);
-    const file = try mapStr(try r.u32_(), strtab);
+    const name = try mapStr(try r.u32_(), strtab, r.debug);
+    const file = try mapStr(try r.u32_(), strtab, r.debug);
     const line = try r.u32_();
     const column = try r.u32_();
     return .{ .name = name, .pos = .{ .file = file, .line = line, .column = column } };
@@ -86,13 +86,13 @@ fn readConstant(r: *Reader, heap: *ObjectHeap, strtab: []const types.InternId, s
             const bits = try r.u64_();
             return Value.float(@bitCast(bits));
         },
-        5 => return Value.string(try mapStr(try r.u32_(), strtab)),
-        6 => return Value.path(try mapStr(try r.u32_(), strtab)),
+        5 => return Value.string(try mapStr(try r.u32_(), strtab, r.debug)),
+        6 => return Value.path(try mapStr(try r.u32_(), strtab, r.debug)),
         7 => {
             const count = try r.u32_();
             const entries = scratch.alloc(AttrEntry, count) catch return error.OutOfMemory;
             for (entries) |*e| {
-                const name = try mapStr(try r.u32_(), strtab);
+                const name = try mapStr(try r.u32_(), strtab, r.debug);
                 const val = try readConstant(r, heap, strtab, scratch);
                 e.* = .{ .name = name, .value = val };
             }
@@ -129,24 +129,25 @@ fn remapLoadedField(
     chunk_ids_so_far: []const types.ChunkId,
     strtab: []const types.InternId,
     deferred_ids: []const u32,
+    debug: bool,
 ) Error!usize {
-    const len = opcode_mod.checkedFieldLen(f, code, at) catch return corruptAt(@src());
+    const len = opcode_mod.checkedFieldLen(f, code, at) catch return corruptAt(@src(), debug);
     switch (f) {
         .deferred_id => |w| {
             std.debug.assert(op == .thunk_defer);
             const ordinal = readW(code, at, w);
-            if (ordinal >= deferred_ids.len) return corruptAt(@src());
+            if (ordinal >= deferred_ids.len) return corruptAt(@src(), debug);
             writeW(code, at, w, deferred_ids[ordinal]);
         },
         .chunk_id => |w| {
             const ordinal = readW(code, at, w);
-            if (ordinal >= chunk_ids_so_far.len) return corruptAt(@src());
+            if (ordinal >= chunk_ids_so_far.len) return corruptAt(@src(), debug);
             const new_id = chunk_ids_so_far[ordinal];
             if (w == .b2 and new_id > 0xFFFF) return error.Unfit;
             writeW(code, at, w, new_id);
         },
         .intern => |w| {
-            const new_id = try mapStr(readW(code, at, w), strtab);
+            const new_id = try mapStr(readW(code, at, w), strtab, debug);
             if (w == .b2 and new_id > 0xFFFF) return error.Unfit;
             writeW(code, at, w, new_id);
         },
@@ -155,7 +156,7 @@ fn remapLoadedField(
             var p = at + 1;
             var i: usize = 0;
             while (i < count) : (i += 1) {
-                const new_id = try mapStr(readW(code, p, w), strtab);
+                const new_id = try mapStr(readW(code, p, w), strtab, debug);
                 if (w == .b2 and new_id > 0xFFFF) return error.Unfit;
                 writeW(code, p, w, new_id);
                 p += w.bytes();
@@ -166,7 +167,7 @@ fn remapLoadedField(
             var p = at + 4;
             var i: usize = 0;
             while (i < count) : (i += 1) {
-                const new_id = try mapStr(readW(code, p, w), strtab);
+                const new_id = try mapStr(readW(code, p, w), strtab, debug);
                 if (w == .b2 and new_id > 0xFFFF) return error.Unfit;
                 writeW(code, p, w, new_id);
                 p += w.bytes() + 2;
@@ -180,7 +181,7 @@ fn remapLoadedField(
                 const tag = code[p];
                 p += 1;
                 if (tag == 0) {
-                    const new_id = try mapStr(encoding.readU32(code, p), strtab);
+                    const new_id = try mapStr(encoding.readU32(code, p), strtab, debug);
                     writeW(code, p, .b4, new_id);
                     p += 4;
                 }
@@ -213,16 +214,17 @@ fn remapAndFixChunk(
     deferred_ids: []const u32,
     attr_names: []const types.InternId,
     attr_pos: []AttrPosEntry,
+    debug: bool,
 ) Error!void {
     var cursor: opcode_mod.InstructionCursor = .{ .code = code };
-    while (cursor.next() catch return corruptAt(@src())) |insn| {
+    while (cursor.next() catch return corruptAt(@src(), debug)) |insn| {
         var off = insn.ip + 1;
         const op = insn.op;
         for (opcode_mod.layout(op)) |f| {
-            off += try remapLoadedField(code, op, f, off, chunk_ids_so_far, strtab, deferred_ids);
+            off += try remapLoadedField(code, op, f, off, chunk_ids_so_far, strtab, deferred_ids, debug);
         }
         std.debug.assert(off == insn.end);
-        try fixSortedInvariantsAt(code, insn.ip, op, attr_names, attr_pos);
+        try fixSortedInvariantsAt(code, insn.ip, op, attr_names, attr_pos, debug);
     }
 }
 
@@ -249,13 +251,14 @@ fn fixSortedInvariantsAt(
     op: OpCode,
     attr_names: []const types.InternId,
     attr_pos: []AttrPosEntry,
+    debug: bool,
 ) Error!void {
     {
         switch (op) {
             .attrs_new_named_srt, .attrs_new_named_pos_srt => {
                 const count = encoding.readU16(code, ip + 1);
                 const names_start = encoding.readU32(code, ip + 3);
-                if (names_start + count > attr_names.len) return corruptAt(@src());
+                if (names_start + count > attr_names.len) return corruptAt(@src(), debug);
                 var ascending = true;
                 var i: usize = 1;
                 while (i < count) : (i += 1) {
@@ -273,7 +276,7 @@ fn fixSortedInvariantsAt(
                 if (op == .attrs_new_named_pos_srt) {
                     const pos_count = encoding.readU16(code, ip + 7);
                     const pos_start = encoding.readU32(code, ip + 9);
-                    if (pos_start + pos_count > attr_pos.len) return corruptAt(@src());
+                    if (pos_start + pos_count > attr_pos.len) return corruptAt(@src(), debug);
                     std.mem.sort(AttrPosEntry, attr_pos[pos_start .. pos_start + pos_count], {}, struct {
                         fn lessThan(_: void, a: AttrPosEntry, b: AttrPosEntry) bool {
                             return a.name < b.name;
@@ -324,7 +327,7 @@ fn decodeChunk(
     name_table: []const NameId,
     scratch: std.mem.Allocator,
 ) Error!LoadedChunk {
-    const name_id = try mapName(try r.u32_(), name_table);
+    const name_id = try mapName(try r.u32_(), name_table, r.debug);
 
     const local_count = try r.u16_();
     const arity = try r.u16_();
@@ -342,9 +345,9 @@ fn decodeChunk(
     const lp_tag = try r.u8_();
     const lambda_pattern: model.LambdaPattern = switch (lp_tag) {
         0 => .none,
-        1 => .{ .var_pat = try mapStr(try r.u32_(), strtab) },
+        1 => .{ .var_pat = try mapStr(try r.u32_(), strtab, r.debug) },
         2 => blk: {
-            const bind_id = try mapStr(try r.u32_(), strtab);
+            const bind_id = try mapStr(try r.u32_(), strtab, r.debug);
             const has_bind = (try r.u8_()) != 0;
             const ellipsis = (try r.u8_()) != 0;
             break :blk .{ .attrs_pat = .{ .bind_name = bind_id, .has_bind = has_bind, .ellipsis = ellipsis } };
@@ -367,7 +370,7 @@ fn decodeChunk(
     const attr_names_count = try r.u32_();
     const attr_names = deps.allocator.alloc(types.InternId, attr_names_count) catch return error.OutOfMemory;
     errdefer deps.allocator.free(attr_names);
-    for (attr_names) |*a| a.* = try mapStr(try r.u32_(), strtab);
+    for (attr_names) |*a| a.* = try mapStr(try r.u32_(), strtab, r.debug);
 
     const attr_pos_count = try r.u32_();
     const attr_pos = deps.allocator.alloc(AttrPosEntry, attr_pos_count) catch return error.OutOfMemory;
@@ -378,7 +381,7 @@ fn decodeChunk(
     const function_args = deps.allocator.alloc(AttrEntry, function_args_count) catch return error.OutOfMemory;
     errdefer deps.allocator.free(function_args);
     for (function_args) |*e| {
-        const name = try mapStr(try r.u32_(), strtab);
+        const name = try mapStr(try r.u32_(), strtab, r.debug);
         const is_bool = (try r.u8_()) != 0;
         e.* = .{ .name = name, .value = Value.boolVal(is_bool) };
     }
@@ -453,6 +456,7 @@ const CommitContext = struct {
             @intCast(chunk.capture_bytes.len),
             chunk_ids,
             self.strtab,
+            self.deps.debug,
         );
         try self.deps.deferred.registerBatch(self.deferred_entries, self.deferred_ids);
         for (self.chunks, 0..) |*chunk, i| {
@@ -464,6 +468,7 @@ const CommitContext = struct {
                 self.deferred_ids,
                 chunk.attr_names,
                 @constCast(chunk.attr_pos),
+                self.deps.debug,
             ) catch unreachable;
             chunk.scheduling.trivial = builder_mod.classifyTrivialBody(
                 chunk.code,
@@ -475,23 +480,23 @@ const CommitContext = struct {
 };
 
 pub fn load(bytes: []const u8, deps: LoadDeps) Error!LoadResult {
-    try validator.validateUnit(deps.allocator, bytes, deps.source.len);
-    var r: Reader = .{ .bytes = bytes };
+    try validator.validateUnit(deps.allocator, bytes, deps.source.len, deps.debug);
+    var r: Reader = .{ .bytes = bytes, .debug = deps.debug };
     const magic = try r.bytesN(4);
-    if (!std.mem.eql(u8, magic, "FIXC")) return corruptAt(@src());
+    if (!std.mem.eql(u8, magic, "FIXC")) return r.corrupt(@src());
     const version = try r.u32_();
     if (version != format_version) return error.Stale;
     // Whole-payload integrity before any deserialization: a torn write or
     // bit flip must never reach the operand decoders.
     const sum = try r.u64_();
-    if (sum != std.hash.Wyhash.hash(checksum_seed, bytes[checksum_end..])) return corruptAt(@src());
+    if (sum != std.hash.Wyhash.hash(checksum_seed, bytes[checksum_end..])) return r.corrupt(@src());
     const chunk_count = try r.u32_();
     const deferred_count = try r.u32_();
     const scope_count = try r.u32_();
     const strtab_count = try r.u32_();
     const name_node_count = try r.u32_();
     const top_ordinal = try r.u32_();
-    if (chunk_count == 0 or top_ordinal >= chunk_count) return corruptAt(@src());
+    if (chunk_count == 0 or top_ordinal >= chunk_count) return r.corrupt(@src());
 
     // Wire shape is trusted from here. Scratch holds lookup tables and the
     // explicit owned unit; persistent slices remain owned here until the one
@@ -512,10 +517,10 @@ pub fn load(bytes: []const u8, deps: LoadDeps) Error!LoadResult {
         const parent_biased = try r.u32_();
         const seg_stridx = try r.u32_();
         const synthetic = try r.u8_();
-        const seg_id = try mapStr(seg_stridx, strtab);
+        const seg_id = try mapStr(seg_stridx, strtab, r.debug);
         const parent: NameId = if (parent_biased == 0) root_name_id else blk: {
             const pidx = parent_biased - 1;
-            if (pidx >= i) return corruptAt(@src()); // parent must precede child
+            if (pidx >= i) return r.corrupt(@src()); // parent must precede child
             break :blk name_table[pidx];
         };
         slot.* = deps.registry.childName(parent, seg_id, synthetic != 0) catch |e| return wrapErr(e);
@@ -528,7 +533,7 @@ pub fn load(bytes: []const u8, deps: LoadDeps) Error!LoadResult {
         for (caps) |*cap| {
             const kind_byte = try r.u8_();
             const index = try r.u16_();
-            const nid = try mapStr(try r.u32_(), strtab);
+            const nid = try mapStr(try r.u32_(), strtab, r.debug);
             cap.* = .{
                 .name = deps.intern.get(nid),
                 .name_id = nid,
@@ -550,7 +555,7 @@ pub fn load(bytes: []const u8, deps: LoadDeps) Error!LoadResult {
         const scope_ordinal = try r.u32_();
 
         const node = deps.ast_arena.createNode(.elided, .{ .atom = .{ .offset = offset, .len = span_len } }) catch return error.OutOfMemory;
-        const name_id = try mapName(name_biased, name_table);
+        const name_id = try mapName(name_biased, name_table, r.debug);
 
         entry.* = .{
             .node = node,

@@ -71,6 +71,13 @@ pub const Policy = struct {
     /// coverage loss; not qualified.
     chain_split: bool = false,
     let_float_report: bool = false,
+    /// Census-only (`FIX_PROF_DUP`, `-Dprof-main` builds): count repeated
+    /// thunk instantiations. The structural hash costs real cycles inside
+    /// spans that other counters attribute, so it stays opt-in per run.
+    dup_census: bool = false,
+    /// `FIX_CC_DEBUG`: print the source location at which the chunk-cache
+    /// decoder rejects a blob as corrupt. See docs/compiler/chunk-cache.md.
+    cc_debug: bool = false,
 };
 
 /// Resolve import and directory prefetch limits. Both require helper workers.
@@ -130,6 +137,8 @@ pub fn resolve(
         .named_floats_enabled = !envEnabled(env, "FIX_FL_NAMED_OFF", false),
         .chain_split = envEnabled(env, "FIX_FL_CHAIN_SPLIT", false),
         .let_float_report = envEnabled(env, "FIX_LET_FLOAT_STATS", false),
+        .dup_census = envValue(env, "FIX_PROF_DUP") != null,
+        .cc_debug = envValue(env, "FIX_CC_DEBUG") != null,
     };
 }
 

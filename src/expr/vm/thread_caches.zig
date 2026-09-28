@@ -1,7 +1,9 @@
 //! Lazily allocated caches owned by an evaluator OS thread.
 //!
 //! TLS holds one lazy pointer; the cache bundle is allocated only for threads
-//! that execute evaluator code.
+//! that execute evaluator code. The bundle comes from the caller's allocator,
+//! which is the process allocator `main` gives the Engine, so these caches sit
+//! in the same accounted memory as the rest of the evaluator.
 
 const std = @import("std");
 const types = @import("runtime").types;
@@ -43,27 +45,32 @@ pub const Caches = struct {
 };
 
 threadlocal var local: ?*Caches = null;
+/// The allocator that made `local`. Teardown returns the bundle to the
+/// allocator that supplied it, not to whichever one reaches `unregister`.
+threadlocal var local_owner: std.mem.Allocator = undefined;
 
 const max_workers = 256;
 var registry: [max_workers]?*Caches = @splat(null);
 
-/// Return this OS thread's cache bundle, allocating it on first VM use.
+/// Return this OS thread's cache bundle, allocating it from `gpa` on first VM
+/// use. The bundle is near one megabyte and lives for the life of the thread.
 /// Zero is the empty sentinel for every cache's heap token, so byte-zeroing is
-/// sufficient; individual tagged values need not be initialized.
+/// sufficient. Individual tagged values need not be initialized.
 /// Resolve the cache pointer on the OS thread active at this call. Keeping
 /// this out of migratable fiber frames prevents LLVM from retaining the old
 /// thread's TLS base across a yield.
-pub noinline fn get() *Caches {
+pub noinline fn get(gpa: std.mem.Allocator) *Caches {
     if (local) |caches| return caches;
-    const caches = std.heap.c_allocator.create(Caches) catch @panic("VM thread cache allocation failed");
+    const caches = gpa.create(Caches) catch @panic("VM thread cache allocation failed");
     @memset(std.mem.asBytes(caches), 0);
     local = caches;
+    local_owner = gpa;
     return caches;
 }
 
 /// Publish this worker's cache roots for the stop-the-world collector.
-pub fn register(worker_id: u8) void {
-    registry[worker_id] = get();
+pub fn register(gpa: std.mem.Allocator, worker_id: u8) void {
+    registry[worker_id] = get(gpa);
 }
 
 /// Remove the collector-visible pointer and release this OS thread's bundle.
@@ -72,7 +79,7 @@ pub fn register(worker_id: u8) void {
 pub fn unregister(worker_id: u8) void {
     registry[worker_id] = null;
     if (local) |caches| {
-        std.heap.c_allocator.destroy(caches);
+        local_owner.destroy(caches);
         local = null;
     }
 }
