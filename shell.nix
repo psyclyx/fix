@@ -32,7 +32,6 @@ pkgs.mkShell {
     pkgs.pkg-config
     pkgs.ripgrep
     pkgs.hyperfine
-    pkgs.libgit2
     pkgs.mercurial
     pkgs.gnutar
   ]

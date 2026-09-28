@@ -99,8 +99,7 @@ that evaluation's heap remains available to inspect.
 environment is exercised on x86_64 Linux; other platforms have received less
 testing.
 
-Nix is not required to build `fix`. A direct build requires Zig 0.16,
-`pkg-config` and libgit2:
+Nix is not required to build `fix`. A direct build requires only Zig 0.16:
 
 ```console
 $ git clone https://github.com/psyclyx/fix
