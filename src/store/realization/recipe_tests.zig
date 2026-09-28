@@ -212,6 +212,53 @@ test "daemon worker spans bracket validity checks and store writes" {
     } else return error.MissingRecipeRealizationApi;
 }
 
+test "a daemon runtime re-attached after clearExecution keeps serving from its started pool" {
+    if (comptime realizationApiAvailable()) {
+        var fake = try FakeDaemon.start(std.testing.allocator, std.testing.io);
+        defer fake.deinit();
+        var store = RealizationStore.init(std.testing.allocator);
+        defer store.deinit();
+
+        // Held locally so the same runtime can be attached twice: the pool it
+        // starts here has to survive the detach in between.
+        store.setIo(std.testing.io);
+        store.testAccess().useBorrowedDaemonSocket(fake.socketPath());
+        const rt = try std.testing.allocator.create(DaemonRuntime);
+        rt.* = DaemonRuntime.init();
+        rt.pool_workers = 1;
+        store.testAccess().takeDaemonRuntime(rt);
+
+        try store.recordOwnedNarRecipe(dep_nar_path, try owned(std.testing.allocator, "nar payload"));
+        try store.ensureClosure(dep_nar_path);
+
+        store.clearExecution();
+        store.testAccess().takeDaemonRuntime(rt);
+
+        // Reconfiguring a started runtime is refused, so the second attach has
+        // to take the running driver back rather than ask for a new one.
+        try store.recordOwnedTextRecipe(dep_text_path, try owned(std.testing.allocator, "dependency"), &.{});
+        try store.ensureClosure(dep_text_path);
+    } else return error.MissingRecipeRealizationApi;
+}
+
+test "a selected store backend starts only once across clearExecution" {
+    if (comptime realizationApiAvailable()) {
+        var dummy = DummyStore.init(std.testing.allocator);
+        defer dummy.deinit();
+        var store = RealizationStore.init(std.testing.allocator);
+        defer store.deinit();
+        try attachDummy(&store, &dummy);
+
+        store.enableStoreWrites();
+        try std.testing.expectEqual(@as(usize, 1), dummy.startCount());
+
+        store.clearExecution();
+        try store.recordOwnedTextRecipe(dep_text_path, try owned(std.testing.allocator, "dependency"), &.{});
+        try store.ensureClosure(dep_text_path);
+        try std.testing.expectEqual(@as(usize, 1), dummy.startCount());
+    } else return error.MissingRecipeRealizationApi;
+}
+
 test "dummy backend realizes dependency closures through the store interface" {
     if (comptime realizationApiAvailable()) {
         var dummy = DummyStore.init(std.testing.allocator);
