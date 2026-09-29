@@ -8,6 +8,7 @@ const heap_mod = @import("runtime").heap;
 const strings = @import("strings.zig");
 const vm_force = @import("../force.zig");
 const vm_trace = @import("../trace.zig");
+const vm_strings = @import("../strings.zig");
 const effect_message = @import("../effect_message.zig");
 const effects = @import("../../effects.zig");
 const error_capture = @import("../errors.zig");
@@ -27,8 +28,15 @@ pub fn debugBreakError(self: *VM, value: Value) !void {
     }
 }
 
+/// The message of `throw`/`abort`. Nix coerces it as `"${…}"` does, so a
+/// path (copied to the store), a derivation, or a set with `__toString` or
+/// `outPath` is an ordinary message, and `tryEval` still catches the throw.
+fn errorMessageArg(self: *VM, message_arg: Value) ![]const u8 {
+    return vm_strings.stringBytes(self, try vm_strings.coerceLanguageStringValue(self, message_arg));
+}
+
 pub fn builtinThrow(self: *VM, message_arg: Value) !Value {
-    try vm_trace.setErrorMessage(self, try strings.stringArg(self, message_arg));
+    try vm_trace.setErrorMessage(self, try errorMessageArg(self, message_arg));
     try debugBreakError(self, message_arg);
     return error.NixThrow;
 }
@@ -39,7 +47,7 @@ pub fn builtinAbort(self: *VM, message_arg: Value) !Value {
     const message = try std.fmt.allocPrint(
         self.allocator,
         "evaluation aborted with the following error message: '{s}'",
-        .{try strings.stringArg(self, message_arg)},
+        .{try errorMessageArg(self, message_arg)},
     );
     defer self.allocator.free(message);
     try vm_trace.setErrorMessage(self, message);
@@ -147,7 +155,7 @@ pub fn builtinWarn(self: *VM, message_arg: Value, value_arg: Value) !Value {
     return vm_force.forceValue(self, value_arg);
 }
 
-fn emitLanguageEffect(self: *VM, kind: effects.Kind, message: []const u8) !void {
+pub fn emitLanguageEffect(self: *VM, kind: effects.Kind, message: []const u8) !void {
     const store = self.effects orelse return;
     self.effect_epoch +%= 1;
     if (self.speculation.active) {

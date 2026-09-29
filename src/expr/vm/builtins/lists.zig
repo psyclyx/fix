@@ -19,10 +19,19 @@ const vm_force = @import("../force.zig");
 const vm_equality = @import("../equality.zig");
 const vm_closures = @import("../closures.zig");
 const vm_strings = @import("../strings.zig");
+const vm_trace = @import("../trace.zig");
 
 const isCallable = strings.isCallable;
 const isPlainString = strings.isPlainString;
 const stringTextInternId = strings.stringTextInternId;
+
+/// Nix's `forceFunction`: force `arg`, which must be callable (a lambda, a
+/// builtin, or a set with `__functor`) even if it is never called.
+fn forceFunction(self: *VM, arg: Value) !Value {
+    const func = try vm_force.forceValue(self, arg);
+    if (!try isCallable(self, func)) return vm_trace.notCallableError(self, func);
+    return func;
+}
 
 pub fn builtinLength(self: *VM, arg: Value) !Value {
     const value = try vm_force.forceValue(self, arg);
@@ -98,6 +107,7 @@ pub fn builtinListToAttrs(self: *VM, arg: Value) !Value {
 
         const name_value = try vm_force.forceValue(self, try self.heap.getAttrValue(item_value.asObjectId(), name_id));
         if (!isPlainString(name_value)) return error.TypeError;
+        try vm_strings.rejectContext(self, name_value);
         // Constructive boundary: the name WILL exist, so heap-resident
         // text interns here.
         const name_intern = try vm_strings.stringNameId(self, name_value);
@@ -293,7 +303,7 @@ pub fn builtinDeepSeq(self: *VM, first: Value, second: Value) !Value {
 }
 
 pub fn builtinAll(self: *VM, pred_arg: Value, list_arg: Value) !Value {
-    const pred = try vm_force.forceValue(self, pred_arg);
+    const pred = try forceFunction(self, pred_arg);
     const list = try vm_force.forceValue(self, list_arg);
     if (!list.isList()) return error.TypeError;
 
@@ -310,7 +320,7 @@ pub fn builtinAll(self: *VM, pred_arg: Value, list_arg: Value) !Value {
 }
 
 pub fn builtinAny(self: *VM, pred_arg: Value, list_arg: Value) !Value {
-    const pred = try vm_force.forceValue(self, pred_arg);
+    const pred = try forceFunction(self, pred_arg);
     const list = try vm_force.forceValue(self, list_arg);
     if (!list.isList()) return error.TypeError;
 
@@ -327,12 +337,14 @@ pub fn builtinAny(self: *VM, pred_arg: Value, list_arg: Value) !Value {
 }
 
 pub fn builtinFilter(self: *VM, pred_arg: Value, list_arg: Value) !Value {
-    const pred = try vm_force.forceValue(self, pred_arg);
+    // Like `map` and `sort`, an empty list is returned before the predicate
+    // is forced.
     const list = try vm_force.forceValue(self, list_arg);
     if (!list.isList()) return error.TypeError;
-
     const list_id = list.asObjectId();
     const n = try self.heap.getListLen(list_id);
+    if (n == 0) return list;
+    const pred = try forceFunction(self, pred_arg);
 
     var out: std.ArrayListUnmanaged(Value) = .empty;
     defer out.deinit(self.allocator);
@@ -351,10 +363,12 @@ pub fn builtinFilter(self: *VM, pred_arg: Value, list_arg: Value) !Value {
 }
 
 pub fn builtinMap(self: *VM, fn_arg: Value, list_arg: Value) !Value {
-    const func = try vm_force.forceValue(self, fn_arg);
-    if (!try isCallable(self, func)) return error.NotCallable;
+    // Nix forces the list first and returns an empty one as it is, without
+    // forcing the function: `map (throw "f") [ ]` is `[ ]`.
     const list = try vm_force.forceValue(self, list_arg);
     if (!list.isList()) return error.TypeError;
+    if (try self.heap.getListLen(list.asObjectId()) == 0) return list;
+    const func = try forceFunction(self, fn_arg);
 
     const items = try self.heap.getList(list.asObjectId());
     const out = try self.allocator.alloc(Value, items.len);
@@ -378,7 +392,7 @@ pub fn builtinMapValue(self: *VM, func_arg: Value, item_arg: Value) !Value {
 }
 
 pub fn builtinConcatMap(self: *VM, fn_arg: Value, list_arg: Value) !Value {
-    const func = try vm_force.forceValue(self, fn_arg);
+    const func = try forceFunction(self, fn_arg);
     const list = try vm_force.forceValue(self, list_arg);
     if (!list.isList()) return error.TypeError;
 
@@ -405,11 +419,12 @@ pub fn builtinConcatMap(self: *VM, fn_arg: Value, list_arg: Value) !Value {
 }
 
 pub fn builtinGenList(self: *VM, fn_arg: Value, count_arg: Value) !Value {
-    const func = try vm_force.forceValue(self, fn_arg);
     const count = try vm_force.forceValue(self, count_arg);
     if (!int_mod.isAnyInt(count)) return error.TypeError;
     const count_i = int_mod.get(count, self.heap);
     if (count_i < 0 or count_i > std.math.maxInt(usize)) return error.TypeError;
+    // Forced even for a length of 0, as in Nix.
+    const func = try forceFunction(self, fn_arg);
 
     const len: usize = @intCast(count_i);
     const out = try self.allocator.alloc(Value, len);
@@ -431,14 +446,20 @@ pub fn builtinGenList(self: *VM, fn_arg: Value, count_arg: Value) !Value {
 }
 
 pub fn builtinSort(self: *VM, cmp_arg: Value, list_arg: Value) !Value {
-    const cmp = try vm_force.forceValue(self, cmp_arg);
     const list = try vm_force.forceValue(self, list_arg);
     if (!list.isList()) return error.TypeError;
-
     const list_id = list.asObjectId();
+    const n = try self.heap.getListLen(list_id);
+    if (n == 0) return list;
+    const cmp = try forceFunction(self, cmp_arg);
+
+    // Nix forces every element before sorting, even a lone one that is never
+    // compared: `sort lessThan [ (throw "x") ]` fails.
     const items = try self.heap.getList(list_id);
     vm_force.forceListAccelerate(self, list_id, items);
-    const sorted = try self.allocator.dupe(Value, items);
+    var i: usize = 0;
+    while (i < n) : (i += 1) _ = try vm_force.forceValue(self, try self.heap.getListItem(list_id, i));
+    const sorted = try self.allocator.dupe(Value, try self.heap.getList(list_id));
     defer self.allocator.free(sorted);
 
     // Block sort: O(n log n) comparisons, O(1) scratch, and stable — Nix's
@@ -466,7 +487,7 @@ pub fn builtinSort(self: *VM, cmp_arg: Value, list_arg: Value) !Value {
 }
 
 pub fn builtinPartition(self: *VM, pred_arg: Value, list_arg: Value) !Value {
-    const pred = try vm_force.forceValue(self, pred_arg);
+    const pred = try forceFunction(self, pred_arg);
     const list = try vm_force.forceValue(self, list_arg);
     if (!list.isList()) return error.TypeError;
 
@@ -482,6 +503,8 @@ pub fn builtinPartition(self: *VM, pred_arg: Value, list_arg: Value) !Value {
     var i: usize = 0;
     while (i < n) : (i += 1) {
         const item = try self.heap.getListItem(list_id, i);
+        // Nix forces each element before handing it to the predicate.
+        _ = try vm_force.forceValue(self, item);
         const result = try vm_force.forceValue(self, try vm_closures.callValue(self, pred, item));
         if (!result.isBool()) return error.TypeError;
         if (result.asBool()) {
@@ -499,7 +522,7 @@ pub fn builtinPartition(self: *VM, pred_arg: Value, list_arg: Value) !Value {
 }
 
 pub fn builtinGroupBy(self: *VM, fn_arg: Value, list_arg: Value) !Value {
-    const func = try vm_force.forceValue(self, fn_arg);
+    const func = try forceFunction(self, fn_arg);
     const list = try vm_force.forceValue(self, list_arg);
     if (!list.isList()) return error.TypeError;
 
@@ -524,6 +547,7 @@ pub fn builtinGroupBy(self: *VM, fn_arg: Value, list_arg: Value) !Value {
         const item = try self.heap.getListItem(list_id, i);
         const key = try vm_force.forceValue(self, try vm_closures.callValue(self, func, item));
         if (!isPlainString(key)) return error.TypeError;
+        try vm_strings.rejectContext(self, key);
         // Constructive name boundary: groupBy keys become attr names.
         const key_id = try vm_strings.stringNameId(self, key);
         const index = (try group_idx.find(self.allocator, groups.items, key_id)) orelse blk: {
@@ -551,8 +575,11 @@ pub fn builtinGenericClosure(self: *VM, arg: Value) !Value {
     if (!attrs.isAttrs()) return error.TypeError;
 
     const start_set = try vm_force.forceValue(self, try self.heap.getAttrValue(attrs.asObjectId(), try self.intern.intern("startSet")));
-    const operator = try vm_force.forceValue(self, try self.heap.getAttrValue(attrs.asObjectId(), try self.intern.intern("operator")));
     if (!start_set.isList()) return error.TypeError;
+    // As in Nix, the closure of nothing is the start set itself, and
+    // `operator` is neither looked up nor forced.
+    if (try self.heap.getListLen(start_set.asObjectId()) == 0) return start_set;
+    const operator = try vm_force.forceValue(self, try self.heap.getAttrValue(attrs.asObjectId(), try self.intern.intern("operator")));
 
     var result: std.ArrayListUnmanaged(Value) = .empty;
     defer result.deinit(self.allocator);
@@ -593,7 +620,7 @@ pub fn builtinGenericClosure(self: *VM, arg: Value) !Value {
 }
 
 pub fn builtinFoldlStrict(self: *VM, op_arg: Value, nul_arg: Value, list_arg: Value) !Value {
-    const op = try vm_force.forceValue(self, op_arg);
+    const op = try forceFunction(self, op_arg);
     // The initial accumulator stays lazy — Nix's foldl' is not strict in the
     // seed, so `foldl' (_: x: x) (throw "…") xs` never forces the throw. Only
     // each op *result* is forced, below.
@@ -602,6 +629,9 @@ pub fn builtinFoldlStrict(self: *VM, op_arg: Value, nul_arg: Value, list_arg: Va
     if (!list.isList()) return error.TypeError;
 
     const list_id = list.asObjectId();
+    // With nothing to fold the result is the seed, forced like every other
+    // builtin result.
+    if (try self.heap.getListLen(list_id) == 0) return vm_force.forceValue(self, nul_arg);
     const items = try self.heap.getList(list_id);
     vm_force.forceListAccelerate(self, list_id, items);
     // GC: `acc` becomes a NEW value produced by `op` (not reachable through any

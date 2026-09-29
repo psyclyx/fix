@@ -17,6 +17,7 @@ const source_store = @import("source_store.zig");
 const vm_force = @import("../force.zig");
 const vm_trace = @import("../trace.zig");
 const vm_strings = @import("../strings.zig");
+const heap_mod = @import("runtime").heap;
 
 const stringArg = strings.stringArg;
 const stringTextInternId = strings.stringTextInternId;
@@ -58,7 +59,7 @@ pub fn builtinDirOf(self: *VM, arg: Value) !Value {
 }
 
 pub fn builtinPlaceholder(self: *VM, arg: Value) !Value {
-    const output = try stringArg(self, arg);
+    const output = try vm_strings.noContextString(self, arg);
     const fingerprint = try std.fmt.allocPrint(self.allocator, "nix-output:{s}", .{output});
     defer self.allocator.free(fingerprint);
     const hash = try nix_hash.hashBytesNixBase32(self.allocator, "sha256", fingerprint);
@@ -68,10 +69,66 @@ pub fn builtinPlaceholder(self: *VM, arg: Value) !Value {
     return Value.string(try self.intern.intern(text));
 }
 
+/// `storePath p`: `p` (or what its symlinks resolve to) must be in the
+/// store. The result is `p` itself, depending on the store path it is in.
 pub fn builtinStorePath(self: *VM, arg: Value) !Value {
-    const path = try strings.pathArg(self, arg);
-    if (!std.fs.path.isAbsolute(path)) return error.RelativePath;
-    return contextStringWithPath(self, try self.intern.intern(path));
+    if (self.policy.pure_eval) {
+        try vm_trace.setErrorMessage(self, "'builtins.storePath' is not allowed in pure evaluation mode");
+        return error.RestrictedInPureEval;
+    }
+    const gc_roots = vm_force.rootsBegin(self);
+    defer vm_force.rootsEnd(self, gc_roots);
+    const value = try strings.coerceWithoutCopy(self, arg);
+    vm_force.rootKeep(self, value);
+    const text = try vm_strings.stringBytes(self, value);
+    if (!std.fs.path.isAbsolute(text)) return error.RelativePath;
+    const canonical = try std.fs.path.resolve(self.allocator, &.{text});
+    defer self.allocator.free(canonical);
+
+    const store_dir = self.realization.store_dir;
+    // Resolve symlinks, unless the path is a store path itself (a symlink
+    // directly in the store stays as it is). A path that doesn't exist is
+    // kept.
+    var resolved: ?[]u8 = null;
+    defer if (resolved) |r| self.allocator.free(r);
+    if (!derivation.store_name.isStorePath(store_dir, canonical)) {
+        if (self.files.io) |io| {
+            resolved = std.Io.Dir.cwd().realPathFileAlloc(io, canonical, self.allocator) catch null;
+        }
+    }
+    const path = resolved orelse canonical;
+    const root = storePathRoot(store_dir, path) orelse {
+        const message = try std.fmt.allocPrint(self.allocator, "path '{s}' is not in the Nix store", .{path});
+        defer self.allocator.free(message);
+        try vm_trace.setErrorMessage(self, message);
+        return error.InvalidStorePath;
+    };
+    if (!derivation.store_name.isStorePath(store_dir, root)) try validateStorePathName(self, path_ops.baseName(root));
+    // With a store to write to, the path must exist there (Nix's
+    // `ensurePath`, short of substituting it).
+    if (self.realization.storeWritesEnabled() and !try self.realization.pathIsValid(root)) {
+        const message = try std.fmt.allocPrint(self.allocator, "path '{s}' is not valid", .{root});
+        defer self.allocator.free(message);
+        try vm_trace.setErrorMessage(self, message);
+        return error.InvalidStorePath;
+    }
+
+    var entries: std.ArrayListUnmanaged(heap_mod.AttrEntry) = .empty;
+    defer entries.deinit(self.allocator);
+    if (value.isContextString()) {
+        const context = (try self.heap.getContextString(value.asObjectId())).context;
+        for (context.names, context.values) |n, v| try string_context.appendContextEntry(self, &entries, n, v);
+    }
+    try string_context.appendContextEntry(self, &entries, try self.intern.intern(root), try string_context.pathContextValue(self));
+    return Value.contextString(try self.heap.addContextStringEntries(try self.intern.intern(path), entries.items));
+}
+
+/// `<store_dir>/<name>` for a path at or below it.
+fn storePathRoot(store_dir: []const u8, path: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, path, store_dir)) return null;
+    if (path.len <= store_dir.len + 1 or path[store_dir.len] != '/') return null;
+    const end = std.mem.indexOfScalarPos(u8, path, store_dir.len + 1, '/') orelse path.len;
+    return path[0..end];
 }
 
 fn optionalAttr(self: *VM, attrs_id: ObjectId, name: []const u8) !Value {

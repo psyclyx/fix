@@ -10,6 +10,7 @@ const ObjectId = types.ObjectId;
 const InternId = types.InternId;
 const heap_mod = @import("runtime").heap;
 const int_mod = @import("runtime").int;
+const numeric = @import("runtime").numeric;
 const version = @import("runtime").version;
 const regex = @import("../../support.zig").regex;
 const toml = @import("../../support.zig").toml;
@@ -22,10 +23,11 @@ const strings = @import("strings.zig");
 const string_context = @import("string_context.zig");
 const vm_force = @import("../force.zig");
 const vm_strings = @import("../strings.zig");
+const vm_closures = @import("../closures.zig");
+const vm_trace = @import("../trace.zig");
 const equality = @import("../equality.zig");
 
 const appendContextEntry = string_context.appendContextEntry;
-const coerceStringContextValue = strings.coerceStringContextValue;
 const contextEntriesForValue = string_context.contextEntriesForValue;
 const isPlainString = strings.isPlainString;
 const sourcePathStringValue = strings.sourcePathStringValue;
@@ -102,10 +104,15 @@ fn writeJsonValueInner(
         },
         .list => try writeJsonList(self, writer, forced.asObjectId(), seen, context),
         .attrs => {
-            if (try jsonAttrsStringValue(self, forced)) |string_value| {
-                try writeJsonStringValue(self, writer, string_value, context);
+            const peeled = try peelToStringOutPath(self, forced);
+            vm_force.rootKeep(self, peeled.value);
+            if (peeled.value.isAttrs()) {
+                try writeJsonAttrs(self, writer, peeled.value.asObjectId(), seen, context);
+            } else if (peeled.through_to_string and peeled.value.isPath()) {
+                // Nix's quirk: a path from `__toString` isn't copied.
+                try writeJsonStringValue(self, writer, Value.string(peeled.value.asInternId()), context);
             } else {
-                try writeJsonAttrs(self, writer, forced.asObjectId(), seen, context);
+                try writeJsonValueInner(self, writer, peeled.value, seen, context);
             }
         },
         .closure, .builtin, .builtin_closure, .partial_app => return error.TypeError,
@@ -138,24 +145,53 @@ fn writeJsonStringValue(
     }
 }
 
-pub fn jsonAttrsStringValue(self: *VM, attrs: Value) !?Value {
-    const attrs_id = attrs.asObjectId();
+pub const Peeled = struct {
+    /// Forced: anything but a set, or a set with neither attribute.
+    value: Value,
+    /// Some `__toString` was called on the way.
+    through_to_string: bool,
+};
 
-    const to_string_id = try self.intern.intern("__toString");
-    if (self.heap.getAttrValue(attrs_id, to_string_id)) |_| {
-        return try coerceStringContextValue(self, attrs);
-    } else |err| switch (err) {
-        error.MissingAttribute => {},
-        else => return err,
-    }
+/// Nix's `peelToStringOutPath`, how `toJSON` (and structured attrs) see a
+/// set: follow `__toString` (called with the set) and else `outPath`, again
+/// and again, and serialize whatever is left. So `toJSON { outPath = 1; }`
+/// is `1` and `toJSON { outPath.a = 1; }` is `{"a":1}`. A `__toString` must
+/// end in a string or a path. The caller roots the result.
+pub fn peelToStringOutPath(self: *VM, attrs: Value) !Peeled {
+    return peelFrom(self, attrs, false);
+}
 
-    const out_path_id = try self.intern.intern("outPath");
-    if (self.heap.getAttrValue(attrs_id, out_path_id)) |_| {
-        return try coerceStringContextValue(self, attrs);
-    } else |err| switch (err) {
-        error.MissingAttribute => return null,
-        else => return err,
+fn peelFrom(self: *VM, value: Value, through_to_string: bool) anyerror!Peeled {
+    const forced = try vm_force.forceValue(self, value);
+    if (!forced.isAttrs()) return peeledEnd(self, forced, through_to_string);
+    try vm_strings.coercionEnter(self);
+    defer vm_strings.coercionExit(self);
+    const gc_roots = vm_force.rootsBegin(self);
+    defer vm_force.rootsEnd(self, gc_roots);
+    vm_force.rootKeep(self, forced);
+
+    const attrs_id = forced.asObjectId();
+    if (try self.heap.getAttrValueOpt(attrs_id, try self.intern.intern("__toString"))) |to_string| {
+        const result = try vm_closures.callValue(self, try vm_force.forceValue(self, to_string), forced);
+        vm_force.rootKeep(self, result);
+        return peelFrom(self, result, true);
     }
+    if (try self.heap.getAttrValueOpt(attrs_id, try self.intern.intern("outPath"))) |out_path| {
+        return peelFrom(self, out_path, through_to_string);
+    }
+    return peeledEnd(self, forced, through_to_string);
+}
+
+fn peeledEnd(self: *VM, value: Value, through_to_string: bool) !Peeled {
+    if (through_to_string and !isStringLikeValue(value)) {
+        try vm_trace.setErrorMessage(self, "`__toString` should return a string");
+        return error.TypeError;
+    }
+    return .{ .value = value, .through_to_string = through_to_string };
+}
+
+fn isStringLikeValue(value: Value) bool {
+    return value.isString() or value.isContextString() or value.isHeapString() or value.isPath();
 }
 
 fn writeJsonList(
@@ -303,7 +339,11 @@ fn writeXmlValue(
         .bool_true => try writer.writeAll("<bool value=\"true\" />\n"),
         .int => try writer.print("<int value=\"{}\" />\n", .{forced.asInt()}),
         .boxed_int => try writer.print("<int value=\"{}\" />\n", .{try self.heap.getBoxedInt(forced.asObjectId())}),
-        .float => try writer.print("<float value=\"{d}\" />\n", .{forced.asFloat()}),
+        .float => {
+            // Nix streams the double with the default precision: `%g`.
+            var buf: [numeric.g_max_len]u8 = undefined;
+            try writer.print("<float value=\"{s}\" />\n", .{numeric.formatG(&buf, forced.asFloat(), 6)});
+        },
         .string => {
             try writer.writeAll("<string value=\"");
             try writeXmlEscaped(writer, self.intern.get(forced.asInternId()));
@@ -333,7 +373,10 @@ fn writeXmlValue(
         .list => try writeXmlList(self, writer, forced.asObjectId(), depth, context, mode, drvs_seen),
         .attrs => try writeXmlAttrs(self, writer, forced.asObjectId(), depth, context, mode, drvs_seen),
         .closure => try writeXmlFunction(self, writer, forced, depth),
-        .builtin, .builtin_closure, .partial_app => try writer.writeAll("<function />\n"),
+        // Nix only describes lambdas; a primop, applied or not, is
+        // `<unevaluated />`.
+        .builtin, .builtin_closure => try writer.writeAll("<unevaluated />\n"),
+        .partial_app => try writer.writeAll("<function />\n"),
         .thunk => unreachable,
     }
 }
@@ -563,7 +606,7 @@ fn writeXmlEscaped(writer: *std.Io.Writer, text: []const u8) !void {
 }
 
 pub fn builtinFromJSON(self: *VM, arg: Value) !Value {
-    const text = try stringArg(self, arg);
+    const text = try vm_strings.noContextString(self, arg);
     // Duplicate object keys keep the last value, matching Nix (`{"k":1,"k":2}`
     // → `{ k = 2; }`) rather than erroring.
     var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, text, .{
@@ -614,7 +657,7 @@ fn attrsFromJson(self: *VM, object: std.json.ObjectMap) !Value {
 }
 
 pub fn builtinFromTOML(self: *VM, arg: Value) !Value {
-    const text = try stringArg(self, arg);
+    const text = try vm_strings.noContextString(self, arg);
     var parsed = try toml.parse(self.allocator, text);
     defer parsed.deinit();
     return valueFromToml(self, .{ .table = parsed.root });
@@ -654,13 +697,15 @@ pub fn builtinCompareVersions(self: *VM, left_arg: Value, right_arg: Value) !Val
     const left_value = try vm_force.forceValue(self, left_arg);
     const right_value = try vm_force.forceValue(self, right_arg);
     if (!isPlainString(left_value) or !isPlainString(right_value)) return error.TypeError;
+    try vm_strings.rejectContext(self, left_value);
+    try vm_strings.rejectContext(self, right_value);
     const left = try vm_strings.stringBytes(self, left_value);
     const right = try vm_strings.stringBytes(self, right_value);
-    return Value.int(try version.compareVersions(self.allocator, left, right));
+    return Value.int(version.compareVersions(left, right));
 }
 
 pub fn builtinSplitVersion(self: *VM, arg: Value) !Value {
-    const text = try stringArg(self, arg);
+    const text = try vm_strings.noContextString(self, arg);
     const parts = try version.splitVersion(self.allocator, text);
     defer self.allocator.free(parts);
 
@@ -677,23 +722,43 @@ pub fn builtinSplitVersion(self: *VM, arg: Value) !Value {
 /// else compiled locally into `owned` (standalone test VMs), which the
 /// caller deinits via `defer`.
 fn resolvePattern(self: *VM, pattern_id: InternId, owned: *?regex.Pattern) !*const regex.Pattern {
-    if (self.regexes) |cache| return cache.get(pattern_id, self.intern.get(pattern_id));
-    owned.* = try regex.Pattern.compile(self.allocator, self.intern.get(pattern_id));
-    return &owned.*.?;
+    const source = self.intern.get(pattern_id);
+    const compiled = if (self.regexes) |cache|
+        cache.get(pattern_id, source)
+    else if (regex.Pattern.compile(self.allocator, source)) |pattern| blk: {
+        owned.* = pattern;
+        break :blk &owned.*.?;
+    } else |err| err;
+    return compiled catch |err| {
+        const message = switch (err) {
+            error.InvalidRegex => try std.fmt.allocPrint(self.allocator, "invalid regular expression '{s}'", .{source}),
+            error.RegexTooLarge => try std.fmt.allocPrint(self.allocator, "memory limit exceeded by regular expression '{s}'", .{source}),
+            else => return err,
+        };
+        defer self.allocator.free(message);
+        try vm_trace.setErrorMessage(self, message);
+        return err;
+    };
+}
+
+/// The pattern argument of `match` and `split`, compiled before the
+/// string is forced, as Nix does.
+fn patternArg(self: *VM, arg: Value, owned: *?regex.Pattern) !*const regex.Pattern {
+    const pattern_value = try vm_force.forceValue(self, arg);
+    if (!isPlainString(pattern_value)) return vm_trace.typeErrorExpected(self, "a string", pattern_value);
+    try vm_strings.rejectContext(self, pattern_value);
+    // The PatternCache is keyed by intern id, so a heap-resident pattern
+    // interns here (patterns are short and bounded in number).
+    return resolvePattern(self, try vm_strings.stringNameId(self, pattern_value), owned);
 }
 
 pub fn builtinMatch(self: *VM, regex_arg: Value, text_arg: Value) !Value {
-    const pattern_value = try vm_force.forceValue(self, regex_arg);
-    const text_value = try vm_force.forceValue(self, text_arg);
-    if (!isPlainString(pattern_value) or !isPlainString(text_value)) return error.TypeError;
-    // The PatternCache is keyed by intern id, so a heap-resident pattern
-    // interns here (patterns are short and bounded in number).
-    const pattern_id = try vm_strings.stringNameId(self, pattern_value);
-    const text = try vm_strings.stringBytes(self, text_value);
-
     var owned: ?regex.Pattern = null;
     defer if (owned) |*p| p.deinit();
-    const pattern = try resolvePattern(self, pattern_id, &owned);
+    const pattern = try patternArg(self, regex_arg, &owned);
+    const text_value = try vm_force.forceValue(self, text_arg);
+    if (!isPlainString(text_value)) return vm_trace.typeErrorExpected(self, "a string", text_value);
+    const text = try vm_strings.stringBytes(self, text_value);
 
     const matched = (try pattern.matchFull(self.allocator, text)) orelse return Value.null_val;
     defer matched.deinit(self.allocator);
@@ -701,38 +766,29 @@ pub fn builtinMatch(self: *VM, regex_arg: Value, text_arg: Value) !Value {
 }
 
 pub fn builtinSplit(self: *VM, regex_arg: Value, text_arg: Value) !Value {
-    const pattern_value = try vm_force.forceValue(self, regex_arg);
-    const text_value = try vm_force.forceValue(self, text_arg);
-    if (!isPlainString(pattern_value) or !isPlainString(text_value)) return error.TypeError;
-    const pattern_id = try vm_strings.stringNameId(self, pattern_value);
-    const text = try vm_strings.stringBytes(self, text_value);
-
     var owned: ?regex.Pattern = null;
     defer if (owned) |*p| p.deinit();
-    const pattern = try resolvePattern(self, pattern_id, &owned);
+    const pattern = try patternArg(self, regex_arg, &owned);
+    const text_value = try vm_force.forceValue(self, text_arg);
+    if (!isPlainString(text_value)) return vm_trace.typeErrorExpected(self, "a string", text_value);
+    const text = try vm_strings.stringBytes(self, text_value);
 
     var out: std.ArrayListUnmanaged(Value) = .empty;
     defer out.deinit(self.allocator);
 
+    // Each match is preceded by the text since the previous one.
     var cursor: usize = 0;
-    var search_start: usize = 0;
-    while (search_start <= text.len) {
-        const found = (try pattern.find(self.allocator, text, search_start)) orelse break;
-        errdefer found.deinit(self.allocator);
-
+    var matches = pattern.iterator(text);
+    while (try matches.next(self.allocator)) |found| {
+        defer found.deinit(self.allocator);
         try out.append(self.allocator, try vm_strings.makeString(self, text[cursor..found.start]));
         try out.append(self.allocator, try regexCapturesValue(self, found.captures));
-
         cursor = found.end;
-        // A zero-length match must not advance `cursor`, only the next search
-        // position: the character stepped over belongs to the FOLLOWING
-        // separator's prefix. Emitting it as an element of its own would add a
-        // string where the 2n+1 alternation demands a capture list, which every
-        // consumer indexing `split` by parity relies on.
-        search_start = if (found.start == found.end) found.end + 1 else found.end;
-        found.deinit(self.allocator);
     }
 
+    // Without a match Nix returns the argument itself, so its context
+    // survives; the pieces around a match never carry context.
+    if (out.items.len == 0) return Value.list(try self.heap.addList(&.{text_value}));
     try out.append(self.allocator, try vm_strings.makeString(self, text[cursor..]));
     return Value.list(try self.heap.addList(out.items));
 }
@@ -751,7 +807,7 @@ fn regexCapturesValue(self: *VM, captures: []const ?[]const u8) !Value {
 }
 
 pub fn builtinParseDrvName(self: *VM, arg: Value) !Value {
-    const parsed = version.parseDrvName(try stringArg(self, arg));
+    const parsed = version.parseDrvName(try vm_strings.noContextString(self, arg));
     const entries = [_]heap_mod.AttrEntry{
         .{
             .name = try self.intern.intern("name"),

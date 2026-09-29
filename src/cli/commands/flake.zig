@@ -11,6 +11,7 @@ const args = @import("../args.zig");
 const render = @import("../render.zig");
 const setup = @import("../setup.zig");
 const config_discovery = @import("../config_discovery.zig");
+const cli_flake_ref = @import("../flake_ref.zig");
 
 const Engine = engine.Engine;
 const Value = @import("runtime").Value;
@@ -81,9 +82,13 @@ pub fn run(process: @import("../process_context.zig").ProcessContext, init: std.
         return 2;
     }
 
-    if (std.mem.eql(u8, sub, "metadata")) return metadata(&ev, init.io, term.use_color, allocator, flakeRefOf(&options));
-    if (std.mem.eql(u8, sub, "show")) return show(&ev, init.io, term.use_color, allocator, flakeRefOf(&options));
-    if (std.mem.eql(u8, sub, "check")) return check(&ev, init.io, term.use_color, allocator, flakeRefOf(&options));
+    if (!std.mem.eql(u8, sub, "update") and !std.mem.eql(u8, sub, "lock")) {
+        const flake_ref = try cli_flake_ref.resolve(allocator, init.io, ev.basePath(), flakeRefOf(&options));
+        defer allocator.free(flake_ref);
+        if (std.mem.eql(u8, sub, "metadata")) return metadata(&ev, init.io, term.use_color, allocator, flake_ref);
+        if (std.mem.eql(u8, sub, "show")) return show(&ev, init.io, term.use_color, allocator, flake_ref);
+        if (std.mem.eql(u8, sub, "check")) return check(&ev, init.io, term.use_color, allocator, flake_ref);
+    }
     // update/lock operate on the cwd flake; positionals are input names.
     if (std.mem.eql(u8, sub, "update")) return lockCmd(&ev, init.io, term.use_color, allocator, &options, true);
     if (std.mem.eql(u8, sub, "lock")) return lockCmd(&ev, init.io, term.use_color, allocator, &options, false);

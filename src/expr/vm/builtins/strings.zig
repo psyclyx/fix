@@ -11,6 +11,7 @@ const InternId = types.InternId;
 const ObjectId = types.ObjectId;
 const heap_mod = @import("runtime").heap;
 const int_mod = @import("runtime").int;
+const numeric = @import("runtime").numeric;
 const source_paths = @import("store").realization.source_path;
 const string_context = @import("string_context.zig");
 const vm_force = @import("../force.zig");
@@ -143,6 +144,32 @@ pub fn coerceAttrsStringContextValue(self: *VM, attrs: Value) !Value {
         else => return err,
     };
     return coerceStringContextValue(self, out_path);
+}
+
+/// Nix's `coerceToString` with `copyToStore = false`: a path stays its own
+/// text.
+pub fn coerceWithoutCopy(self: *VM, arg: Value) anyerror!Value {
+    const value = try vm_force.forceValue(self, arg);
+    switch (value.kind()) {
+        .string, .string_context, .heap_string => return value,
+        .path => return Value.string(value.asInternId()),
+        .attrs => {
+            try vm_strings.coercionEnter(self);
+            defer vm_strings.coercionExit(self);
+            const gc_roots = vm_force.rootsBegin(self);
+            defer vm_force.rootsEnd(self, gc_roots);
+            vm_force.rootKeep(self, value);
+            const id = value.asObjectId();
+            if (try self.heap.getAttrValueOpt(id, try self.intern.intern("__toString"))) |to_string| {
+                return coerceWithoutCopy(self, try vm_closures.callValue(self, try vm_force.forceValue(self, to_string), value));
+            }
+            if (try self.heap.getAttrValueOpt(id, try self.intern.intern("outPath"))) |out_path| {
+                return coerceWithoutCopy(self, out_path);
+            }
+            return vm_trace.coercionError(self, value);
+        },
+        else => return vm_trace.coercionError(self, value),
+    }
 }
 
 pub fn sourcePathStringValue(self: *VM, path_id: InternId) !Value {
@@ -343,9 +370,8 @@ pub fn coerceToStringValue(self: *VM, arg: Value) !Value {
             // Nix coerces a float with C++ `std::to_string` — fixed-point with
             // 6 fractional digits (`1.0` → "1.000000", `1.5e-6` → "0.000002"),
             // NOT the shortest `%g` form used to *print* a value.
-            var buf: [400]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d:.6}", .{value.asFloat()}) catch unreachable;
-            return vm_strings.makeUniqueString(self, s);
+            var buf: [numeric.to_string_max_len]u8 = undefined;
+            return vm_strings.makeUniqueString(self, numeric.formatToString(&buf, value.asFloat()));
         },
         .bool_false, .null => return Value.string(try self.intern.intern("")),
         .bool_true => return Value.string(try self.intern.intern("1")),
@@ -454,9 +480,8 @@ pub fn coerceDerivationStringValue(self: *VM, arg: Value) !Value {
             // Nix coerces a float with C++ `std::to_string` — fixed-point with
             // 6 fractional digits (`1.0` → "1.000000", `1.5e-6` → "0.000002"),
             // NOT the shortest `%g` form used to *print* a value.
-            var buf: [400]u8 = undefined;
-            const s = std.fmt.bufPrint(&buf, "{d:.6}", .{value.asFloat()}) catch unreachable;
-            return vm_strings.makeUniqueString(self, s);
+            var buf: [numeric.to_string_max_len]u8 = undefined;
+            return vm_strings.makeUniqueString(self, numeric.formatToString(&buf, value.asFloat()));
         },
         .bool_false, .null => return Value.string(try self.intern.intern("")),
         .bool_true => return Value.string(try self.intern.intern("1")),

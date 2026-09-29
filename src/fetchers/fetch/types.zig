@@ -80,6 +80,8 @@ pub const TarballResult = struct {
     path: []u8,
     nar_payload: ?TarballNar,
     forge_metadata: ?ForgeMetadata,
+    /// The newest mtime of the archive's entries (Nix's `lastModified`).
+    last_modified: i64 = 0,
     cached: bool = false,
 
     pub fn deinit(self: TarballResult, allocator: std.mem.Allocator) void {
@@ -97,6 +99,9 @@ pub const GitResult = struct {
     last_modified: i64,
     last_modified_date: []u8,
     submodules: bool,
+    /// A local work tree with uncommitted changes to tracked files: `rev` is
+    /// HEAD, but the tree isn't HEAD's.
+    dirty: bool = false,
 
     pub fn deinit(self: GitResult, allocator: std.mem.Allocator) void {
         allocator.free(self.out_path);

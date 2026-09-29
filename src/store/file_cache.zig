@@ -26,6 +26,19 @@ pub const FileCache = struct {
     /// Protects the hashmap structure only. Held briefly during
     /// lookup / insert, never across I/O.
     map_mu: sync.BlockingMutex = .{},
+    /// Store paths whose contents are read from elsewhere on the host, as
+    /// Nix mounts a fetched tree at its store path: a tree fetched in plain
+    /// eval gets its real store path without the store being written.
+    /// Guarded by `map_mu`.
+    mounts: std.ArrayListUnmanaged(Mount) = .empty,
+
+    pub const Mount = struct {
+        store_path: []u8,
+        host_path: []u8,
+        /// A name left out of the tree at every depth (a checkout's `.git`),
+        /// as its NAR serialization leaves it out.
+        hidden: ?[]const u8,
+    };
 
     const max_read_bytes = 128 * 1024 * 1024;
 
@@ -97,6 +110,7 @@ pub const FileCache = struct {
     };
 
     const Entry = struct {
+        /// The canonical path, and the cache key.
         path: []u8,
         /// Guards the populated-fields below. Held during I/O so a
         /// concurrent reader for the same path waits on the in-flight
@@ -128,6 +142,67 @@ pub const FileCache = struct {
             self.allocator.destroy(entry);
         }
         self.entries.deinit(self.allocator);
+        for (self.mounts.items) |m| {
+            self.allocator.free(m.store_path);
+            self.allocator.free(m.host_path);
+        }
+        self.mounts.deinit(self.allocator);
+    }
+
+    /// Serve `store_path` from `host_path`, leaving out entries named
+    /// `hidden`. Mounting a store path again moves it to the new host path:
+    /// store paths are content-addressed, so both hold the same tree, and
+    /// the newer one is the more likely to still exist.
+    pub fn mount(self: *FileCache, store_path: []const u8, host_path: []const u8, hidden: ?[]const u8) !void {
+        const owned_host = try self.allocator.dupe(u8, host_path);
+        errdefer self.allocator.free(owned_host);
+        self.map_mu.lock();
+        defer self.map_mu.unlock();
+        for (self.mounts.items) |*m| {
+            if (!std.mem.eql(u8, m.store_path, store_path)) continue;
+            self.allocator.free(m.host_path);
+            m.host_path = owned_host;
+            m.hidden = hidden;
+            return;
+        }
+        const owned_store = try self.allocator.dupe(u8, store_path);
+        errdefer self.allocator.free(owned_store);
+        try self.mounts.append(self.allocator, .{ .store_path = owned_store, .host_path = owned_host, .hidden = hidden });
+    }
+
+    /// Where a path lives on the host: itself, or its place in a mount.
+    const Host = struct {
+        path: []const u8,
+        mounted: bool = false,
+        /// The path is a name its mount leaves out, so it doesn't exist.
+        hidden: bool = false,
+        /// The name its mount leaves out (static).
+        hidden_name: ?[]const u8 = null,
+    };
+
+    /// Resolve canonical `path` through the mounts, into `buf` when it is
+    /// mounted. Resolved at each host access (rather than once per entry),
+    /// so a re-mounted tree is read from its new place.
+    fn host(self: *FileCache, path: []const u8, buf: *[std.fs.max_path_bytes]u8) !Host {
+        self.map_mu.lock();
+        defer self.map_mu.unlock();
+        for (self.mounts.items) |m| {
+            if (!std.mem.startsWith(u8, path, m.store_path)) continue;
+            const rest = path[m.store_path.len..];
+            if (rest.len != 0 and rest[0] != '/') continue;
+            var hidden = false;
+            if (m.hidden) |name| {
+                var components = std.mem.tokenizeScalar(u8, rest, '/');
+                while (components.next()) |component| {
+                    if (std.mem.eql(u8, component, name)) hidden = true;
+                }
+            }
+            if (m.host_path.len + rest.len > buf.len) return error.NameTooLong;
+            @memcpy(buf[0..m.host_path.len], m.host_path);
+            @memcpy(buf[m.host_path.len..][0..rest.len], rest);
+            return .{ .path = buf[0 .. m.host_path.len + rest.len], .mounted = true, .hidden = hidden, .hidden_name = m.hidden };
+        }
+        return .{ .path = path };
     }
 
     pub fn setIo(self: *FileCache, io: std.Io) void {
@@ -139,12 +214,15 @@ pub const FileCache = struct {
         entry.mu.lock();
         defer entry.mu.unlock();
         if (entry.exists_known) return entry.exists;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const host_path = try self.host(entry.path, &buf);
+        if (host_path.hidden) return false;
 
         const io = self.io orelse return error.FileIoUnavailable;
         // lstat-based existence (matching Nix): the final path component exists
         // even if it is a broken symlink, and a trailing `/`/`/.` on a
         // non-directory does not exist.
-        _ = std.Io.Dir.cwd().statFile(io, entry.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        _ = std.Io.Dir.cwd().statFile(io, host_path.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound, error.NotDir => {
                 entry.exists_known = true;
                 entry.exists = false;
@@ -164,7 +242,10 @@ pub const FileCache = struct {
     pub fn isDirectoryFollowing(self: *FileCache, path: []const u8) !bool {
         const io = self.io orelse return error.FileIoUnavailable;
         const entry = try self.entryFor(path);
-        const stat = std.Io.Dir.cwd().statFile(io, entry.path, .{ .follow_symlinks = true }) catch return false;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const host_path = try self.host(entry.path, &buf);
+        if (host_path.hidden) return false;
+        const stat = std.Io.Dir.cwd().statFile(io, host_path.path, .{ .follow_symlinks = true }) catch return false;
         return stat.kind == .directory;
     }
 
@@ -175,7 +256,10 @@ pub const FileCache = struct {
     /// would). `path` must be absolute (store paths always are).
     pub fn existsUncached(self: *FileCache, path: []const u8) !bool {
         const io = self.io orelse return error.FileIoUnavailable;
-        std.Io.Dir.accessAbsolute(io, path, .{}) catch |err| switch (err) {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const host_path = try self.host(path, &buf);
+        if (host_path.hidden) return false;
+        std.Io.Dir.accessAbsolute(io, host_path.path, .{}) catch |err| switch (err) {
             error.FileNotFound => return false,
             else => return err,
         };
@@ -187,6 +271,9 @@ pub const FileCache = struct {
         entry.mu.lock();
         defer entry.mu.unlock();
         if (entry.contents) |contents| return contents.bytes();
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const host_path = try self.host(entry.path, &buf);
+        if (host_path.hidden) return error.FileNotFound;
 
         const io = self.io orelse return error.FileIoUnavailable;
         // RSS attribution: cached source texts live for the evaluator's
@@ -195,7 +282,7 @@ pub const FileCache = struct {
         defer _ = vma.setAllocTag(prev_tag);
         const contents = try std.Io.Dir.cwd().readFileAlloc(
             io,
-            entry.path,
+            host_path.path,
             self.allocator,
             .limited(max_read_bytes),
         );
@@ -221,6 +308,9 @@ pub const FileCache = struct {
         errdefer replacement.release();
 
         const entry = try self.entryFor(path);
+        // A mounted tree stands in for a read-only store path.
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if ((try self.host(entry.path, &buf)).mounted) return error.ReadOnlyFileSystem;
         entry.mu.lock();
         std.Io.Dir.cwd().writeFile(io, .{ .sub_path = entry.path, .data = data }) catch |err| {
             entry.mu.unlock();
@@ -245,13 +335,16 @@ pub const FileCache = struct {
         entry.mu.lock();
         defer entry.mu.unlock();
         if (entry.contents) |contents| return contents.retain();
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const host_path = try self.host(entry.path, &buf);
+        if (host_path.hidden) return error.FileNotFound;
 
         const io = self.io orelse return error.FileIoUnavailable;
         const prev_tag = vma.setAllocTag(.file_cache);
         defer _ = vma.setAllocTag(prev_tag);
         const owned = try std.Io.Dir.cwd().readFileAlloc(
             io,
-            entry.path,
+            host_path.path,
             self.allocator,
             .limited(max_read_bytes),
         );
@@ -286,9 +379,12 @@ pub const FileCache = struct {
         entry.mu.lock();
         defer entry.mu.unlock();
         if (entry.kind) |kind| return kind;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const host_path = try self.host(entry.path, &buf);
+        if (host_path.hidden) return error.FileNotFound;
 
         const io = self.io orelse return error.FileIoUnavailable;
-        const stat = std.Io.Dir.cwd().statFile(io, entry.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        const stat = std.Io.Dir.cwd().statFile(io, host_path.path, .{ .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound => {
                 entry.exists_known = true;
                 entry.exists = false;
@@ -308,8 +404,11 @@ pub const FileCache = struct {
     /// stats the file fresh on every call.
     pub fn isExecutable(self: *FileCache, path: []const u8) !bool {
         const entry = try self.entryFor(path);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const host_path = try self.host(entry.path, &buf);
+        if (host_path.hidden) return error.FileNotFound;
         const io = self.io orelse return error.FileIoUnavailable;
-        const stat = try std.Io.Dir.cwd().statFile(io, entry.path, .{ .follow_symlinks = false });
+        const stat = try std.Io.Dir.cwd().statFile(io, host_path.path, .{ .follow_symlinks = false });
         return @TypeOf(stat.permissions).has_executable_bit and stat.permissions.toMode() & 0o111 != 0;
     }
 
@@ -319,9 +418,12 @@ pub const FileCache = struct {
     /// allocated copy the caller owns.
     pub fn readLink(self: *FileCache, path: []const u8) ![]u8 {
         const entry = try self.entryFor(path);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const host_path = try self.host(entry.path, &buf);
+        if (host_path.hidden) return error.FileNotFound;
         const io = self.io orelse return error.FileIoUnavailable;
         var buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const len = try std.Io.Dir.readLinkAbsolute(io, entry.path, &buffer);
+        const len = try std.Io.Dir.readLinkAbsolute(io, host_path.path, &buffer);
         return self.allocator.dupe(u8, buffer[0..len]);
     }
 
@@ -340,9 +442,13 @@ pub const FileCache = struct {
         defer entry.mu.unlock();
         if (entry.dir_entries) |entries| return entries;
         if (cold) |c| c.* = true;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const host_path = try self.host(entry.path, &buf);
+        if (host_path.hidden) return error.FileNotFound;
+        const hidden_name = host_path.hidden_name;
 
         const io = self.io orelse return error.FileIoUnavailable;
-        var dir = try std.Io.Dir.cwd().openDir(io, entry.path, .{ .iterate = true });
+        var dir = try std.Io.Dir.cwd().openDir(io, host_path.path, .{ .iterate = true });
         defer dir.close(io);
 
         var owned_entries: std.ArrayListUnmanaged(DirEntry) = .empty;
@@ -353,6 +459,7 @@ pub const FileCache = struct {
 
         var iter = dir.iterate();
         while (try iter.next(io)) |dir_entry| {
+            if (hidden_name) |hidden| if (std.mem.eql(u8, dir_entry.name, hidden)) continue;
             const name = try self.allocator.dupe(u8, dir_entry.name);
             owned_entries.append(self.allocator, .{
                 .name = name,
@@ -679,4 +786,56 @@ test "FileCache writeFile replaces cached bytes and invalidates parent listing" 
         if (std.mem.eql(u8, entry.name, "added.lock")) found_added = true;
     }
     try testing.expect(found_added);
+}
+
+test "FileCache serves a mounted store path from its host directory" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "tree/sub/.git");
+    try tmp.dir.createDirPath(testing.io, "tree/.git");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "tree/sub/file", .data = "contents" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "tree/.git/HEAD", .data = "ref" });
+    try tmp.dir.symLink(testing.io, "sub/file", "tree/link", .{});
+    const host = try tmp.dir.realPathFileAlloc(testing.io, "tree", testing.allocator);
+    defer testing.allocator.free(host);
+
+    var cache = FileCache.init(testing.allocator);
+    defer cache.deinit();
+    cache.setIo(testing.io);
+    const store_path = "/nix/store/00000000000000000000000000000000-source";
+    try cache.mount(store_path, host, ".git");
+
+    try testing.expectEqualStrings("contents", try cache.readFile(store_path ++ "/sub/file"));
+    try testing.expectEqualStrings("contents", try cache.readFile(store_path ++ "/link"));
+    try testing.expectEqual(FileCache.FileKind.symlink, try cache.fileType(store_path ++ "/link"));
+    const link = try cache.readLink(store_path ++ "/link");
+    defer testing.allocator.free(link);
+    try testing.expectEqualStrings("sub/file", link);
+    try testing.expect(try cache.pathExists(store_path));
+    try testing.expect(try cache.existsUncached(store_path ++ "/sub"));
+
+    // The hidden name is gone at every depth.
+    for ([_][]const u8{ store_path, store_path ++ "/sub" }) |dir| {
+        const listing = try cache.readDir(dir);
+        for (listing) |entry| try testing.expect(!std.mem.eql(u8, entry.name, ".git"));
+    }
+    try testing.expect(!try cache.pathExists(store_path ++ "/.git"));
+    try testing.expect(!try cache.existsUncached(store_path ++ "/sub/.git"));
+    try testing.expectError(error.FileNotFound, cache.readFile(store_path ++ "/.git/HEAD"));
+
+    // A mount stands in for a read-only store path.
+    try testing.expectError(error.ReadOnlyFileSystem, cache.writeFile(store_path ++ "/new", "x"));
+    // Paths that merely share the prefix are not in the mount.
+    try testing.expect(!try cache.pathExists(store_path ++ "x"));
+
+    // Mounting the store path again (the same tree, elsewhere) moves it, so
+    // it stays readable when the first copy is gone.
+    try tmp.dir.createDirPath(testing.io, "copy/sub");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "copy/sub/other", .data = "contents" });
+    const copy = try tmp.dir.realPathFileAlloc(testing.io, "copy", testing.allocator);
+    defer testing.allocator.free(copy);
+    try cache.mount(store_path, copy, ".git");
+    try tmp.dir.deleteTree(testing.io, "tree");
+    try testing.expectEqualStrings("contents", try cache.readFile(store_path ++ "/sub/other"));
 }

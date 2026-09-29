@@ -64,3 +64,21 @@ test "a cyclic outPath or __toString coercion errors instead of faulting" {
     const ok = try ev.evaluate("builtins.toString { outPath = { outPath = \"/x\"; }; }");
     try std.testing.expectEqualStrings("/x", ev.intern.get(ok.asInternId()));
 }
+
+test "toString of a float prints its exact value to six decimals, like std::to_string" {
+    const renderForTest = @import("../test_helpers.zig").renderForTest;
+    const cases = [_]struct { []const u8, []const u8 }{
+        .{ "builtins.toString 1.5", "\"1.500000\"" },
+        // A tie in binary rounds to even; the shortest decimal digits of
+        // these doubles would round up.
+        .{ "builtins.toString 1.0078125", "\"1.007812\"" },
+        .{ "builtins.toString 6.71088640127945e7", "\"67108864.012794\"" },
+        .{ "builtins.toString 3.002399751580331e16", "\"30023997515803312.000000\"" },
+        .{ "builtins.toString [ 1.0e23 ]", "\"99999999999999991611392.000000\"" },
+    };
+    for (cases) |case| {
+        const rendered = try renderForTest(case[0]);
+        defer std.testing.allocator.free(rendered);
+        try std.testing.expectEqualStrings(case[1], rendered);
+    }
+}

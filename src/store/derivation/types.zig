@@ -5,6 +5,7 @@
 const std = @import("std");
 const heap_mod = @import("runtime").heap;
 const InternId = @import("runtime").types.InternId;
+const Value = @import("runtime").value.Value;
 // Deep clone/free ownership helpers for these types live in `clone.zig`;
 // the struct `deinit` methods below reach the free helpers through it.
 const clone = @import("clone.zig");
@@ -14,6 +15,10 @@ const AttrEntry = heap_mod.AttrEntry;
 pub const ValueOutput = struct {
     name: InternId,
     out_path: InternId,
+    /// A declared output the `.drv` doesn't have (`outputs = [ "a b" ]` is
+    /// outputs `a` and `b`): its `outPath`, a thunk that fails when forced,
+    /// like `getAttr "a b" strict` in Nix's `derivation.nix`.
+    missing: ?Value = null,
 };
 
 pub const DrvOutput = struct {
@@ -138,6 +143,9 @@ pub const ValueSpec = struct {
     drv_path: InternId,
     default_output: InternId,
     outputs: []const ValueOutput,
-    explicit_outputs: bool,
     original_attrs: heap_mod.AttrsView,
+    /// The outputs as declared, duplicates included, which `all` has one
+    /// value for each of (`derivation.nix` maps over them); empty for the
+    /// order of `outputs`.
+    declared: []const InternId = &.{},
 };

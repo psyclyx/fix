@@ -5,6 +5,7 @@ const VM = @import("../context.zig").VM;
 const types = @import("runtime").types;
 const Value = @import("runtime").value.Value;
 const InternId = types.InternId;
+const heap_mod = @import("runtime").heap;
 const file_cache = @import("store").file_cache;
 const derivation = @import("store").derivation;
 const nar = @import("store").nar;
@@ -17,16 +18,14 @@ const vm_force = @import("../force.zig");
 const vm_closures = @import("../closures.zig");
 const vm_trace = @import("../trace.zig");
 
-const coerceStringContextValue = strings.coerceStringContextValue;
 const contextEntriesForValue = string_context.contextEntriesForValue;
 const contextStringWithPath = string_context.contextStringWithPath;
-const isStringLike = strings.isStringLike;
 const pathArg = strings.pathArg;
 const stringArg = strings.stringArg;
 const stringTextInternId = strings.stringTextInternId;
 
 pub fn builtinGetEnv(self: *VM, name_arg: Value) !Value {
-    const name = try stringArg(self, name_arg);
+    const name = try vm_strings.noContextString(self, name_arg);
     // Pure eval hides the process environment (Nix returns "" for every var).
     if (self.policy.pure_eval) return Value.string(try self.intern.intern(""));
     const host = self.import_host orelse return Value.string(try self.intern.intern(""));
@@ -35,24 +34,41 @@ pub fn builtinGetEnv(self: *VM, name_arg: Value) !Value {
 }
 
 pub fn builtinToPath(self: *VM, arg: Value) !Value {
-    const value = try vm_force.forceValue(self, arg);
-    const text_id: InternId = switch (value.kind()) {
-        .path, .string, .string_context, .heap_string => try vm_strings.stringNameId(self, value),
-        else => return error.TypeError,
-    };
-    if (!std.fs.path.isAbsolute(self.intern.get(text_id))) return error.RelativePath;
-    if (value.isContextString()) return value;
-    return Value.string(text_id);
+    // Nix's `coerceToPath`: coerce like interpolation, but without copying a
+    // path to the store; the result must be absolute, and comes back
+    // canonical, as a string, with its context.
+    const gc_roots = vm_force.rootsBegin(self);
+    defer vm_force.rootsEnd(self, gc_roots);
+    const value = try strings.coerceWithoutCopy(self, arg);
+    vm_force.rootKeep(self, value);
+    const text = try vm_strings.stringBytes(self, value);
+    if (!std.fs.path.isAbsolute(text)) return error.RelativePath;
+    const canonical = try std.fs.path.resolve(self.allocator, &.{text});
+    defer self.allocator.free(canonical);
+    const text_id = try self.intern.intern(canonical);
+    if (!value.isContextString()) return Value.string(text_id);
+    const context = (try self.heap.getContextString(value.asObjectId())).context;
+    const entries = try self.allocator.alloc(heap_mod.AttrEntry, context.len());
+    defer self.allocator.free(entries);
+    for (entries, context.names, context.values) |*entry, name, v| entry.* = .{ .name = name, .value = v };
+    return Value.contextString(try self.heap.addContextStringEntries(text_id, entries));
 }
 
 pub fn builtinToFile(self: *VM, name_arg: Value, contents_arg: Value) !Value {
+    // Both arguments must already be strings (Nix's `forceString`), and the
+    // name must not refer to the store.
     const name_value = try vm_force.forceValue(self, name_arg);
-    if (!isStringLike(name_value)) return error.TypeError;
+    if (!strings.isPlainString(name_value)) return vm_trace.typeErrorExpected(self, "a string", name_value);
+    if (name_value.isContextString() and (try contextEntriesForValue(self, name_value)).len() != 0) {
+        try vm_trace.setErrorMessage(self, "the name of a file created by builtins.toFile must not refer to a store path");
+        return error.TypeError;
+    }
 
     const name_id = try vm_strings.stringNameId(self, name_value);
     try validateStorePathName(self.intern.get(name_id));
 
-    const contents_value = try coerceStringContextValue(self, contents_arg);
+    const contents_value = try vm_force.forceValue(self, contents_arg);
+    if (!strings.isPlainString(contents_value)) return vm_trace.typeErrorExpected(self, "a string", contents_value);
     const contents_id = try vm_strings.stringNameId(self, contents_value);
     var ref_ids: std.ArrayListUnmanaged(InternId) = .empty;
     defer ref_ids.deinit(self.allocator);

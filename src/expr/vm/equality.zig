@@ -251,10 +251,10 @@ pub fn compareValues(self: *VM, a: Value, b: Value) !CompareResult {
             return .eq;
         },
         .string, .path, .string_context, .heap_string => {
-            // Plain strings order with plain strings regardless of
-            // residency; other kind pairings keep the exact-match rule.
-            const plainish = (va.isString() or va.isHeapString()) and (vb.isString() or vb.isHeapString());
-            if (!isStringComparable(vb) or (!plainish and vb.kind() != va.kind())) return error.TypeError;
+            // Strings order with strings whatever their residency and
+            // context (Nix's `CompareValues` ignores context); a path only
+            // orders with a path.
+            if (!isStringComparable(vb) or va.isPath() != vb.isPath()) return error.TypeError;
             return switch (std.mem.order(u8, try strings.stringBytes(self, va), try strings.stringBytes(self, vb))) {
                 .lt => .lt,
                 .eq => .eq,
