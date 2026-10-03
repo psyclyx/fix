@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zurl = .{
-            .url = "git+https://git.lilithsemi.com/LilithSemi/zurl#388fa599799cb52816036bbf5da0887a1a83e2d3",
-            .hash = "zurl-0.1.0-eM4POZ5gjAAKkMaw5XdBeWQ6eSMFpglYaE6WxR3dpt1e",
+            .url = "git+https://git.lilithsemi.com/LilithSemi/zurl.git#7a8bf3eb8c4bb79055d2a9e542ff7a4ee7dd312b",
+            .hash = "zurl-0.1.0-eM4POUvdjQAHq6dr8DVoEDuoFf8clw4PKl5Qq9bHalwO",
         },
         .ziggit = .{
             .url = "git+https://git.lilithsemi.com/LilithSemi/ziggit.git#33476955c813e3e36b0addf4a61dcedf0dfe42d6",
