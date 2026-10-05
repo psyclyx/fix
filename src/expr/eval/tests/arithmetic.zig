@@ -47,17 +47,17 @@ test "integer division by zero raises" {
     try std.testing.expectError(error.DivisionByZero, ev.evaluate("1 / 0"));
 }
 
-test "floor and ceil saturate to i64 min near the boundary instead of wrapping" {
-    // The saturated result doesn't fit the inline-int encoding, so it
-    // surfaces as a boxed int; render it to check the observable value
-    // without reaching into the encoding directly.
-    const floored = try renderForTest("builtins.floor 1.0e100");
-    defer std.testing.allocator.free(floored);
-    try std.testing.expectEqualStrings("-9223372036854775808", floored);
+test "floor and ceil reject results outside the integer range" {
+    // Nix < 2.29 returned i64 min here (undefined behaviour in C++); Nix
+    // 2.29+ and Lix raise an error.
+    try std.testing.expectError(error.NumericConversion, renderForTest("builtins.floor 1.0e100"));
+    try std.testing.expectError(error.NumericConversion, renderForTest("builtins.ceil (0.0 - 1.0e100)"));
+    try std.testing.expectError(error.NumericConversion, renderForTest("builtins.floor 9.223372036854776e18"));
 
-    const ceiled = try renderForTest("builtins.ceil (0.0 - 1.0e100)");
-    defer std.testing.allocator.free(ceiled);
-    try std.testing.expectEqualStrings("-9223372036854775808", ceiled);
+    // -2^63 itself is in range; it just needs a boxed int.
+    const lowest = try renderForTest("builtins.floor (0.0 - 9.223372036854776e18)");
+    defer std.testing.allocator.free(lowest);
+    try std.testing.expectEqualStrings("-9223372036854775808", lowest);
 }
 
 test "floor and ceil pass integers through unchanged" {

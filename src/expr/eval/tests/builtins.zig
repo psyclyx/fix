@@ -162,6 +162,13 @@ test "evaluate string builtins" {
     try std.testing.expectEqualStrings("\"/nix/store/4g4g9i669dl63abpww0djbl2jxl6bwiz-x\"", to_file);
 
     try std.testing.expectError(error.InvalidStorePathName, renderForTest("builtins.toFile \"x y\" \"hello\""));
+    // Contents and name must already be strings.
+    try std.testing.expectError(error.TypeError, renderForTest("builtins.toFile \"x\" /x"));
+    try std.testing.expectError(error.TypeError, renderForTest("builtins.toFile \"x\" { __toString = _: \"x\"; }"));
+    try std.testing.expectError(error.TypeError, renderForTest("builtins.toFile /x \"\""));
+    // `.` and `..` can't be the first dash-separated component either.
+    try std.testing.expectError(error.InvalidStorePathName, renderForTest("builtins.toFile \".-\" \"\""));
+    try std.testing.expectError(error.InvalidStorePathName, renderForTest("builtins.toFile \"..-x\" \"\""));
     try std.testing.expectError(
         error.DerivationReferenceInToFile,
         renderForTest(
@@ -234,6 +241,16 @@ test "evaluate JSON builtins" {
     const to_string_json = try renderForTest("builtins.toJSON { __toString = self: self.name; name = \"pkg\"; }");
     defer std.testing.allocator.free(to_string_json);
     try std.testing.expectEqualStrings("\"\\\"pkg\\\"\"", to_string_json);
+
+    // Nix serializes whatever `outPath` (or `__toString`) leads to.
+    const peeled_json = try renderForTest(
+        \\builtins.toJSON [ { outPath = 1; } { outPath = [ 1 ]; } { outPath.foo = true; }
+        \\  { __toString = self: { outPath = "x"; }; } { outPath = null; } { __toString = _: /x/y; } ]
+    );
+    defer std.testing.allocator.free(peeled_json);
+    try std.testing.expectEqualStrings("\"[1,[1],{\\\"foo\\\":true},\\\"x\\\",null,\\\"/x/y\\\"]\"", peeled_json);
+    try std.testing.expectError(error.TypeError, renderForTest("builtins.toJSON { __toString = _: 1; }"));
+    try std.testing.expectError(error.TypeError, renderForTest("builtins.toJSON { __toString = _: { a = 1; }; }"));
 
     const json_preserves_string_context = try renderForTest(
         \\let
@@ -322,6 +339,18 @@ test "toXML escapes exactly the characters Nix escapes" {
     const name = try renderForTest("builtins.toXML { \"a<b\" = 1; }");
     defer std.testing.allocator.free(name);
     try std.testing.expect(std.mem.indexOf(u8, name, "<attr name=\\\"a&lt;b\\\">") != null);
+}
+
+test "toXML prints floats with %g and primops as unevaluated, as Nix does" {
+    const floats = try renderForTest("builtins.toXML [ 123456789.0 0.1 1.0e-5 ]");
+    defer std.testing.allocator.free(floats);
+    try std.testing.expect(std.mem.indexOf(u8, floats, "<float value=\\\"1.23457e+08\\\" />") != null);
+    try std.testing.expect(std.mem.indexOf(u8, floats, "<float value=\\\"0.1\\\" />") != null);
+    try std.testing.expect(std.mem.indexOf(u8, floats, "<float value=\\\"1e-05\\\" />") != null);
+
+    const primops = try renderForTest("builtins.toXML [ builtins.add (builtins.add 1) ]");
+    defer std.testing.allocator.free(primops);
+    try std.testing.expect(std.mem.indexOf(u8, primops, "<list>\\n    <unevaluated />\\n    <unevaluated />\\n  </list>") != null);
 }
 
 // The XML writer recurses on the native stack and streams as it goes, so a
@@ -468,6 +497,26 @@ test "evaluate version parsing builtins" {
     const drv = try renderForTest("(builtins.parseDrvName \"foo-bar-1.2pre3\").version");
     defer std.testing.allocator.free(drv);
     try std.testing.expectEqualStrings("\"1.2pre3\"", drv);
+}
+
+test "version builtins keep punctuation and non-ASCII inside components" {
+    const split = try renderForTest("builtins.splitVersion \"1.a_b-é2\"");
+    defer std.testing.allocator.free(split);
+    try std.testing.expectEqualStrings("[ \"1\" \"a_b\" \"é\" \"2\" ]", split);
+
+    // 2^31 is past Nix's `int` component parse, so it is a word, and words
+    // sort before numbers.
+    const wide = try renderForTest("builtins.compareVersions \"0\" \"2147483648\"");
+    defer std.testing.allocator.free(wide);
+    try std.testing.expectEqualStrings("1", wide);
+
+    const trailing_dash = try renderForTest("builtins.parseDrvName \"a-\"");
+    defer std.testing.allocator.free(trailing_dash);
+    try std.testing.expectEqualStrings("{ name = \"a-\"; version = \"\"; }", trailing_dash);
+
+    const leading_dash = try renderForTest("builtins.parseDrvName \"-0\"");
+    defer std.testing.allocator.free(leading_dash);
+    try std.testing.expectEqualStrings("{ name = \"\"; version = \"0\"; }", leading_dash);
 }
 
 test "evaluate regex builtins" {
@@ -678,7 +727,7 @@ test "evaluate path construction builtins" {
     const file_path = try std.fs.path.join(std.testing.allocator, &.{ cwd, "test/imported.nix" });
     defer std.testing.allocator.free(file_path);
 
-    const store_source = try std.fmt.allocPrint(std.testing.allocator, "builtins.isString (builtins.storePath \"{s}\")", .{cwd});
+    const store_source = try std.testing.allocator.dupe(u8, "builtins.isString (builtins.storePath \"/nix/store/04s49lw7m6vgvdrrkq4iilvzfq7848vy-d/bin\")");
     defer std.testing.allocator.free(store_source);
     const path_source = try std.fmt.allocPrint(std.testing.allocator, "builtins.isString (builtins.path {{ path = \"{s}\"; name = \"imported\"; }})", .{file_path});
     defer std.testing.allocator.free(path_source);

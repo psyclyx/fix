@@ -631,7 +631,6 @@ test "buildStrictValue exposes drvPath and each output path as plain attrs" {
         .drv_path = drv_path,
         .default_output = out_name,
         .outputs = &.{.{ .name = out_name, .out_path = out_path }},
-        .explicit_outputs = false,
         .original_attrs = .{ .names = &.{}, .values = &.{} },
     };
 

@@ -21,8 +21,10 @@ const stringTextInternId = strings.stringTextInternId;
 
 pub fn builtinCatAttrs(self: *VM, name_arg: Value, list_arg: Value) !Value {
     const name = try vm_force.forceValue(self, name_arg);
+    if (!isPlainString(name)) return error.TypeError;
+    try vm_strings.rejectContext(self, name);
     const list = try vm_force.forceValue(self, list_arg);
-    if (!isPlainString(name) or !list.isList()) return error.TypeError;
+    if (!list.isList()) return error.TypeError;
 
     var values: std.ArrayListUnmanaged(Value) = .empty;
     defer values.deinit(self.allocator);
@@ -240,8 +242,10 @@ pub fn builtinFunctionArgs(self: *VM, arg: Value) !Value {
 
 pub fn builtinUnsafeGetAttrPos(self: *VM, name_arg: Value, attrs_arg: Value) !Value {
     const name = try vm_force.forceValue(self, name_arg);
+    if (!isPlainString(name)) return error.TypeError;
+    try vm_strings.rejectContext(self, name);
     const attrs = try vm_force.forceValue(self, attrs_arg);
-    if (!isPlainString(name) or !attrs.isAttrs()) return error.TypeError;
+    if (!attrs.isAttrs()) return error.TypeError;
     const object_id = attrs.asObjectId();
     const name_id = if (name.isHeapString())
         (try vm_strings.lookupNameId(self, name)) orelse return Value.null_val
@@ -270,6 +274,10 @@ pub fn builtinUnsafeGetAttrPos(self: *VM, name_arg: Value, attrs_arg: Value) !Va
     return Value.attrs(try self.heap.addAttrs(&entries));
 }
 
+fn orderInternId(key: InternId, item: InternId) std.math.Order {
+    return std.math.order(key, item);
+}
+
 pub fn builtinRemoveAttrs(self: *VM, attrs_arg: Value, names_arg: Value) !Value {
     const attrs = try vm_force.forceValue(self, attrs_arg);
     const names = try vm_force.forceValue(self, names_arg);
@@ -278,33 +286,31 @@ pub fn builtinRemoveAttrs(self: *VM, attrs_arg: Value, names_arg: Value) !Value 
     var entries: std.ArrayListUnmanaged(heap_mod.AttrEntry) = .empty;
     defer entries.deinit(self.allocator);
 
-    // Resolve names into a prefix cache at most once. Stop extending the
-    // prefix after a match so unused later names remain lazy.
+    // Nix forces every name, in order, before removing anything: even names
+    // that match nothing, or when the set is empty.
     var resolved: std.ArrayListUnmanaged(InternId) = .empty;
     defer resolved.deinit(self.allocator);
 
     const attrs_id = attrs.asObjectId();
     const names_id = names.asObjectId();
     const names_len = try self.heap.getListLen(names_id);
+    var j: usize = 0;
+    while (j < names_len) : (j += 1) {
+        const value = try vm_force.forceValue(self, try self.heap.getListItem(names_id, j));
+        if (!isPlainString(value)) return error.TypeError;
+        try vm_strings.rejectContext(self, value);
+        // A name absent from the intern table matches no entry, so it
+        // needn't be interned.
+        if (try vm_strings.lookupNameId(self, value)) |name_id| try resolved.append(self.allocator, name_id);
+    }
+    std.mem.sort(InternId, resolved.items, {}, std.sort.asc(InternId));
+
     const n = (try self.heap.materializeAttrs(attrs_id)).len();
     var i: usize = 0;
-    outer: while (i < n) : (i += 1) {
-        const entry_name = (try self.heap.materializeAttrs(attrs_id)).names[i];
-        for (resolved.items) |name_id| {
-            if (name_id == entry_name) continue :outer;
-        }
-        while (resolved.items.len < names_len) {
-            const item = try self.heap.getListItem(names_id, resolved.items.len);
-            const value = try vm_force.forceValue(self, item);
-            if (!isPlainString(value)) return error.TypeError;
-            // A name absent from the intern table matches no entry; the
-            // sentinel keeps the resolved-names memo advancing in step
-            // with the list without interning the miss.
-            const name_id = (try vm_strings.lookupNameId(self, value)) orelse std.math.maxInt(InternId);
-            try resolved.append(self.allocator, name_id);
-            if (name_id == entry_name) continue :outer;
-        }
+    while (i < n) : (i += 1) {
         const src = try self.heap.materializeAttrs(attrs_id);
+        const entry_name = src.names[i];
+        if (std.sort.binarySearch(InternId, resolved.items, entry_name, orderInternId) != null) continue;
         try entries.append(self.allocator, .{ .name = entry_name, .value = src.values[i] });
     }
 

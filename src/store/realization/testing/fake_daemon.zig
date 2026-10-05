@@ -26,6 +26,7 @@ pub const FakeDaemon = struct {
     operations: std.ArrayListUnmanaged(Operation) = .empty,
     materializations: std.ArrayListUnmanaged(Materialization) = .empty,
     fail_next_add: bool = false,
+    reject_next_add_early: bool = false,
     fail_next_build: bool = false,
     build_hook: ?BuildHook = null,
     server_error: ?anyerror = null,
@@ -192,6 +193,16 @@ pub const FakeDaemon = struct {
         self.mu.lock();
         defer self.mu.unlock();
         self.fail_next_add = true;
+    }
+
+    /// Reject the next AddToStore before reading its framed payload, as a
+    /// real daemon does a request it can't parse (an invalid name): the
+    /// frames stay in the connection, and a real daemon reads them as the
+    /// next operations.
+    pub fn rejectNextAddEarly(self: *FakeDaemon) void {
+        self.mu.lock();
+        defer self.mu.unlock();
+        self.reject_next_add_early = true;
     }
 
     pub fn failNextBuild(self: *FakeDaemon) void {
@@ -442,6 +453,11 @@ pub const FakeDaemon = struct {
         const references = try wire.readStrings(self.allocator, input);
         defer owned_strings.free(self.allocator, references);
         _ = try wire.readBool(input); // repair
+        self.mu.lock();
+        const early = self.reject_next_add_early;
+        self.reject_next_add_early = false;
+        self.mu.unlock();
+        if (early) return writeDaemonError(output, "scripted early add rejection");
         const payload = try readFramed(self.allocator, input);
         defer self.allocator.free(payload);
         const kind: Kind = if (std.mem.eql(u8, content_address, "text:sha256"))

@@ -1,4 +1,8 @@
 //! Nix version and derivation-name parsing helpers.
+//!
+//! Ports of `libstore/names.cc`: `splitVersion` and `compareVersions` share
+//! Nix's component scanner, so both builtins agree with `nix-env` about
+//! where a version's components begin and end.
 
 const std = @import("std");
 
@@ -7,59 +11,41 @@ pub const ParsedDrvName = struct {
     version: []const u8,
 };
 
+/// The components of `text`, as `builtins.splitVersion` returns them. The
+/// slices borrow `text`.
 pub fn splitVersion(allocator: std.mem.Allocator, text: []const u8) ![][]const u8 {
     var parts: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer parts.deinit(allocator);
 
     var index: usize = 0;
-    while (index < text.len) {
-        const c = text[index];
-        if (isSeparator(c)) {
-            index += 1;
-            continue;
-        }
-
-        const start = index;
-        if (std.ascii.isDigit(c)) {
-            index += 1;
-            while (index < text.len and std.ascii.isDigit(text[index])) index += 1;
-        } else if (std.ascii.isAlphabetic(c)) {
-            index += 1;
-            while (index < text.len and std.ascii.isAlphabetic(text[index])) index += 1;
-        } else {
-            index += 1;
-        }
-        try parts.append(allocator, text[start..index]);
+    while (true) {
+        const part = nextComponent(text, &index);
+        if (part.len == 0) break;
+        try parts.append(allocator, part);
     }
 
     return parts.toOwnedSlice(allocator);
 }
 
-pub fn compareVersions(allocator: std.mem.Allocator, left: []const u8, right: []const u8) !i64 {
-    const left_parts = try splitVersion(allocator, left);
-    defer allocator.free(left_parts);
-    const right_parts = try splitVersion(allocator, right);
-    defer allocator.free(right_parts);
-
-    var index: usize = 0;
-    while (index < left_parts.len or index < right_parts.len) : (index += 1) {
-        const left_part = if (index < left_parts.len) left_parts[index] else "";
-        const right_part = if (index < right_parts.len) right_parts[index] else "";
-        const order = comparePart(left_part, right_part);
-        if (order < 0) return -1;
-        if (order > 0) return 1;
+pub fn compareVersions(left: []const u8, right: []const u8) i64 {
+    var left_index: usize = 0;
+    var right_index: usize = 0;
+    while (left_index < left.len or right_index < right.len) {
+        const left_part = nextComponent(left, &left_index);
+        const right_part = nextComponent(right, &right_index);
+        if (componentLessThan(left_part, right_part)) return -1;
+        if (componentLessThan(right_part, left_part)) return 1;
     }
     return 0;
 }
 
 pub fn parseDrvName(text: []const u8) ParsedDrvName {
-    // Nix splits at the first `-` (past position 0) whose following character is
-    // not a letter — so `name-that-ends-with-dash--1.0` splits at the first of
-    // the double dash, giving version "-1.0" (not "1.0").
-    var index: usize = 1;
-    while (index < text.len) : (index += 1) {
-        const next_not_alpha = index + 1 >= text.len or !std.ascii.isAlphabetic(text[index + 1]);
-        if (text[index] == '-' and next_not_alpha) {
+    // The name is everything before the first `-` that is followed by a
+    // character other than a letter; a trailing `-` is part of the name.
+    // `name-that-ends-with-dash--1.0` splits at the first of the double dash,
+    // giving version "-1.0", and `-1.0` has an empty name.
+    for (text, 0..) |c, index| {
+        if (c == '-' and index + 1 < text.len and !std.ascii.isAlphabetic(text[index + 1])) {
             return .{
                 .name = text[0..index],
                 .version = text[index + 1 ..],
@@ -69,67 +55,104 @@ pub fn parseDrvName(text: []const u8) ParsedDrvName {
     return .{ .name = text, .version = "" };
 }
 
-fn comparePart(left: []const u8, right: []const u8) i8 {
-    if (std.mem.eql(u8, left, right)) return 0;
-    if (left.len == 0) return if (std.mem.eql(u8, right, "pre")) 1 else -1;
-    if (right.len == 0) return if (std.mem.eql(u8, left, "pre")) -1 else 1;
-    // A "pre" (prerelease) component sorts before any other non-empty component.
-    if (std.mem.eql(u8, left, "pre")) return -1;
-    if (std.mem.eql(u8, right, "pre")) return 1;
-
-    const left_number = isNumber(left);
-    const right_number = isNumber(right);
-    if (left_number and right_number) return compareNumbers(left, right);
-    if (left_number != right_number) return if (left_number) 1 else -1;
-
-    return switch (std.mem.order(u8, left, right)) {
-        .lt => -1,
-        .eq => 0,
-        .gt => 1,
-    };
-}
-
-fn compareNumbers(left: []const u8, right: []const u8) i8 {
-    const l = trimLeadingZeroes(left);
-    const r = trimLeadingZeroes(right);
-    if (l.len < r.len) return -1;
-    if (l.len > r.len) return 1;
-    return switch (std.mem.order(u8, l, r)) {
-        .lt => -1,
-        .eq => 0,
-        .gt => 1,
-    };
-}
-
-fn trimLeadingZeroes(text: []const u8) []const u8 {
-    var index: usize = 0;
-    while (index + 1 < text.len and text[index] == '0') index += 1;
-    return text[index..];
-}
-
-fn isNumber(text: []const u8) bool {
-    if (text.len == 0) return false;
-    for (text) |c| {
-        if (!std.ascii.isDigit(c)) return false;
+/// Nix's `nextComponent`: skip separators, then take the longest run of
+/// digits, or else of characters that are neither digits nor separators
+/// (so `_`, other punctuation and non-ASCII bytes stay inside a word).
+/// Returns "" at the end of `text`.
+fn nextComponent(text: []const u8, index: *usize) []const u8 {
+    var i = index.*;
+    while (i < text.len and isSeparator(text[i])) i += 1;
+    const start = i;
+    if (i < text.len) {
+        const digits = std.ascii.isDigit(text[i]);
+        while (i < text.len and std.ascii.isDigit(text[i]) == digits and !isSeparator(text[i])) i += 1;
     }
-    return true;
+    index.* = i;
+    return text[start..i];
+}
+
+/// Nix's `componentsLT`. A component is a number only if it fits a C `int`,
+/// so a run of digits of 2^31 or more compares as a word: before every
+/// number, and by bytes against other words.
+fn componentLessThan(left: []const u8, right: []const u8) bool {
+    const left_number = componentNumber(left);
+    const right_number = componentNumber(right);
+    if (left_number != null and right_number != null) return left_number.? < right_number.?;
+    if (left.len == 0 and right_number != null) return true;
+    if (std.mem.eql(u8, left, "pre") and !std.mem.eql(u8, right, "pre")) return true;
+    if (std.mem.eql(u8, right, "pre")) return false;
+    // `2.3a` < `2.3.1`: a word sorts before a number.
+    if (right_number != null) return true;
+    if (left_number != null) return false;
+    return std.mem.lessThan(u8, left, right);
+}
+
+fn componentNumber(part: []const u8) ?i32 {
+    if (part.len == 0 or !std.ascii.isDigit(part[0])) return null;
+    return std.fmt.parseInt(i32, part, 10) catch null;
 }
 
 fn isSeparator(c: u8) bool {
     return c == '.' or c == '-';
 }
 
-test "splitVersion matches Nix tokenization examples" {
-    const parts = try splitVersion(std.testing.allocator, "1.0-beta2");
+fn expectSplit(text: []const u8, expected: []const []const u8) !void {
+    const parts = try splitVersion(std.testing.allocator, text);
     defer std.testing.allocator.free(parts);
-    try std.testing.expectEqualSlices(u8, "1", parts[0]);
-    try std.testing.expectEqualSlices(u8, "0", parts[1]);
-    try std.testing.expectEqualSlices(u8, "beta", parts[2]);
-    try std.testing.expectEqualSlices(u8, "2", parts[3]);
+    try std.testing.expectEqual(expected.len, parts.len);
+    for (expected, parts) |want, got| try std.testing.expectEqualStrings(want, got);
+}
+
+fn expectCompare(expected: i64, left: []const u8, right: []const u8) !void {
+    try std.testing.expectEqual(expected, compareVersions(left, right));
+    try std.testing.expectEqual(-expected, compareVersions(right, left));
+}
+
+test "splitVersion matches Nix tokenization examples" {
+    try expectSplit("1.0-beta2", &.{ "1", "0", "beta", "2" });
+    try expectSplit("", &.{});
+    try expectSplit(".-.", &.{});
+    // Only `.` and `-` separate components; any other non-digit is part of a
+    // word, including `_`, punctuation and non-ASCII bytes.
+    try expectSplit("__", &.{"__"});
+    try expectSplit("a_b", &.{"a_b"});
+    try expectSplit("1_2", &.{ "1", "_", "2" });
+    try expectSplit("é", &.{"é"});
+    try expectSplit("2.0rc1+git", &.{ "2", "0", "rc", "1", "+git" });
 }
 
 test "compareVersions matches Nix ordering examples" {
-    try std.testing.expectEqual(@as(i64, 0), try compareVersions(std.testing.allocator, "1.02", "1.2"));
-    try std.testing.expectEqual(@as(i64, -1), try compareVersions(std.testing.allocator, "1.0pre", "1.0"));
-    try std.testing.expectEqual(@as(i64, 1), try compareVersions(std.testing.allocator, "1.0", "1.0pre"));
+    try expectCompare(0, "1.02", "1.2");
+    try expectCompare(-1, "1.0pre", "1.0");
+    try expectCompare(-1, "2.3a", "2.3.1");
+    try expectCompare(-1, "2.3", "2.3a");
+    try expectCompare(-1, "a_b", "a_c");
+    try expectCompare(0, "1.0", "1-0");
+}
+
+test "compareVersions treats components past a C int as words" {
+    // Nix parses components with string2Int<int>: 2^31 is not a number, so
+    // it sorts before every number, 0 included.
+    try expectCompare(1, "0", "2147483648");
+    try expectCompare(1, "2147483647", "2147483648");
+    try expectCompare(1, "2147483647", "2147483648a");
+    try expectCompare(0, "0002147483647", "2147483647");
+    try expectCompare(-1, "2147483648", "3147483648");
+}
+
+test "parseDrvName splits at the first dash not followed by a letter" {
+    const cases = [_]struct { []const u8, []const u8, []const u8 }{
+        .{ "apache-httpd-2.0.48", "apache-httpd", "2.0.48" },
+        .{ "name-that-ends-with-dash--1.0", "name-that-ends-with-dash", "-1.0" },
+        .{ "a-", "a-", "" },
+        .{ "a--", "a", "-" },
+        .{ "-0", "", "0" },
+        .{ "-", "-", "" },
+        .{ "", "", "" },
+    };
+    for (cases) |case| {
+        const parsed = parseDrvName(case[0]);
+        try std.testing.expectEqualStrings(case[1], parsed.name);
+        try std.testing.expectEqualStrings(case[2], parsed.version);
+    }
 }

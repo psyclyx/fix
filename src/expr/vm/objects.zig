@@ -25,6 +25,7 @@ pub fn buildAttrs(self: *VM, count: u16) !void {
     var i: u32 = 0;
     while (i < value_count) : (i += 2) {
         const key = self.stack[start + i];
+        try vm_strings.rejectContext(self, key);
         if (key.isHeapString())
             self.stack[start + i] = Value.string(try vm_strings.stringNameId(self, key));
     }

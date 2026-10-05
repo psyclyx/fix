@@ -13,6 +13,7 @@ const clock = @import("base").clock;
 const sync = @import("base").sync;
 const http_transport = @import("http_transport.zig");
 const git_transport = @import("git_transport.zig");
+const url_mod = @import("url.zig");
 const BlockingPool = @import("base").BlockingPool;
 const fetch_types = @import("fetch/types.zig");
 const fetch_config = @import("fetch/config.zig");
@@ -380,15 +381,14 @@ pub const FetchCache = struct {
 
         const out_path = try self.tarballCachePath(io, spec.name, archive.hash);
         errdefer self.allocator.free(out_path);
-        {
+        const last_modified = last_modified: {
             const extraction_lock = &self.fetch_locks[@as(usize, @intCast(std.hash.Wyhash.hash(0, out_path) % self.fetch_locks.len))];
             extraction_lock.lock();
             defer extraction_lock.unlock();
-            try self.ensureTarballExtracted(io, archive.path, out_path);
-        }
+            break :last_modified try self.ensureTarballExtracted(io, archive.path, out_path);
+        };
 
         if (forge_metadata) |*metadata| {
-            const last_modified = try self.maxTreeMtime(io, out_path);
             self.allocator.free(metadata.last_modified_date);
             metadata.last_modified = last_modified;
             metadata.last_modified_date = try formatTimestamp(self.allocator, last_modified);
@@ -405,6 +405,7 @@ pub const FetchCache = struct {
             .path = out_path,
             .nar_payload = nar_payload,
             .forge_metadata = forge_metadata,
+            .last_modified = last_modified,
             .cached = all_cached and archive.cached,
         };
     }
@@ -495,23 +496,19 @@ pub const FetchCache = struct {
         };
     }
 
-    fn maxTreeMtime(self: *FetchCache, io: std.Io, path: []const u8) !i64 {
-        var dir = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true });
-        defer dir.close(io);
-        var walker = try dir.walk(self.allocator);
-        defer walker.deinit();
-        var latest: i64 = 0;
-        while (try walker.next(io)) |entry| {
-            const stat = try entry.dir.statFile(io, entry.basename, .{ .follow_symlinks = false });
-            latest = @max(latest, stat.mtime.toSeconds());
-        }
-        return latest;
-    }
-
-    fn ensureTarballExtracted(self: *FetchCache, io: std.Io, archive_path: []const u8, out_path: []const u8) !void {
+    /// Unpack an archive into `out_path` as Nix does: a lone top-level
+    /// directory becomes the root, anything else (several entries, a single
+    /// file or symlink) stays as it is. Returns the archive's `lastModified`,
+    /// the newest mtime of any of its entries (the stripped directory and a
+    /// `./` entry included), kept beside the tree for later cache hits.
+    fn ensureTarballExtracted(self: *FetchCache, io: std.Io, archive_path: []const u8, out_path: []const u8) !i64 {
         const marker = try std.fmt.allocPrint(self.allocator, "{s}.complete", .{out_path});
         defer self.allocator.free(marker);
-        if (try hostPathExists(io, marker) and try hostPathExists(io, out_path)) return;
+        const last_modified_path = try std.fmt.allocPrint(self.allocator, "{s}.last-modified", .{out_path});
+        defer self.allocator.free(last_modified_path);
+        if (try hostPathExists(io, marker) and try hostPathExists(io, out_path)) {
+            if (try self.readCachedInt(io, last_modified_path)) |cached| return cached;
+        }
 
         if (try hostPathExists(io, out_path)) try std.Io.Dir.cwd().deleteTree(io, out_path);
         std.Io.Dir.deleteFileAbsolute(io, marker) catch {};
@@ -521,9 +518,34 @@ pub const FetchCache = struct {
         defer self.allocator.free(staging);
         errdefer std.Io.Dir.cwd().deleteTree(io, staging) catch {};
         try std.Io.Dir.cwd().createDirPath(io, staging);
-        try self.runCommandDiscard(&.{ "tar", "-xf", archive_path, "-C", staging, "--strip-components=1" });
-        try self.publishStagedDir(io, staging, out_path);
+        // `-vv` lists every entry as it is extracted, with its mtime.
+        const listing = try self.runCommand(&.{ "tar", "-xvvf", archive_path, "-C", staging, "--full-time", "--utc", "--numeric-owner" }, null);
+        defer self.allocator.free(listing.stdout);
+        defer self.allocator.free(listing.stderr);
+        const last_modified = maxListedMtime(listing.stdout);
+
+        if (try singletonDirectory(self.allocator, io, staging)) |only| {
+            defer self.allocator.free(only);
+            const root = try std.fs.path.join(self.allocator, &.{ staging, only });
+            defer self.allocator.free(root);
+            try self.publishStagedDir(io, root, out_path);
+            try std.Io.Dir.cwd().deleteTree(io, staging);
+        } else {
+            try self.publishStagedDir(io, staging, out_path);
+        }
+        var buf: [24]u8 = undefined;
+        try self.publishBytes(io, last_modified_path, try std.fmt.bufPrint(&buf, "{d}\n", .{last_modified}));
         try self.publishBytes(io, marker, "1\n");
+        return last_modified;
+    }
+
+    fn readCachedInt(self: *FetchCache, io: std.Io, path: []const u8) !?i64 {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(64)) catch |err| switch (err) {
+            error.FileNotFound => return null,
+            else => return err,
+        };
+        defer self.allocator.free(bytes);
+        return std.fmt.parseInt(i64, std.mem.trim(u8, bytes, " \n"), 10) catch null;
     }
 
     pub fn fetchMercurial(self: *FetchCache, files: *FileCache, spec: MercurialSpec, _: ?Reporter) !MercurialResult {
@@ -1099,6 +1121,7 @@ pub const FetchCache = struct {
             .last_modified = result.last_modified,
             .last_modified_date = last_modified_date,
             .submodules = submodules,
+            .dirty = result.dirty,
         };
     }
 
@@ -1229,6 +1252,77 @@ fn cleanStoreName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     return clean_name;
 }
 
+/// The one entry of `dir`, if it is a directory (not a symlink to one).
+fn singletonDirectory(allocator: std.mem.Allocator, io: std.Io, dir_path: []const u8) !?[]u8 {
+    var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    const first = (try it.next(io)) orelse return null;
+    if (first.kind != .directory) return null;
+    const name = try allocator.dupe(u8, first.name);
+    errdefer allocator.free(name);
+    if (try it.next(io) != null) {
+        allocator.free(name);
+        return null;
+    }
+    return name;
+}
+
+/// The newest mtime in a GNU tar `-vv --full-time --utc` listing, whose lines
+/// look like `-rw-r--r-- 0/0 2 2001-01-01 00:00:00[.frac] name`. 0 when
+/// there are none (Nix's value for an empty archive).
+fn maxListedMtime(listing: []const u8) i64 {
+    var latest: i64 = 0;
+    var lines = std.mem.splitScalar(u8, listing, '\n');
+    while (lines.next()) |line| {
+        var fields = std.mem.tokenizeScalar(u8, line, ' ');
+        for (0..3) |_| _ = fields.next() orelse break;
+        const date = fields.next() orelse continue;
+        const time = fields.next() orelse continue;
+        latest = @max(latest, parseUtcTimestamp(date, time) orelse continue);
+    }
+    return latest;
+}
+
+/// `YYYY-MM-DD` and `HH:MM:SS[.frac]` (UTC) as Unix seconds, rounded down.
+fn parseUtcTimestamp(date: []const u8, time: []const u8) ?i64 {
+    var date_parts = std.mem.splitScalar(u8, date, '-');
+    const year = std.fmt.parseInt(i64, date_parts.next() orelse return null, 10) catch return null;
+    const month = std.fmt.parseInt(i64, date_parts.next() orelse return null, 10) catch return null;
+    const day = std.fmt.parseInt(i64, date_parts.next() orelse return null, 10) catch return null;
+    if (date_parts.next() != null or month < 1 or month > 12 or day < 1 or day > 31) return null;
+    const whole = time[0 .. std.mem.indexOfScalar(u8, time, '.') orelse time.len];
+    var time_parts = std.mem.splitScalar(u8, whole, ':');
+    const hour = std.fmt.parseInt(i64, time_parts.next() orelse return null, 10) catch return null;
+    const minute = std.fmt.parseInt(i64, time_parts.next() orelse return null, 10) catch return null;
+    const second = std.fmt.parseInt(i64, time_parts.next() orelse return null, 10) catch return null;
+    if (time_parts.next() != null) return null;
+    // Days since 1970-01-01 (Howard Hinnant's days_from_civil).
+    const y = if (month <= 2) year - 1 else year;
+    const era = @divFloor(y, 400);
+    const yoe = y - era * 400;
+    const mp = @mod(month + 9, 12);
+    const doy = @divFloor(153 * mp + 2, 5) + day - 1;
+    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+    const days = era * 146097 + doe - 719468;
+    return days * 86400 + hour * 3600 + minute * 60 + second;
+}
+
+test "maxListedMtime reads GNU tar's verbose listing" {
+    const listing =
+        \\drwxr-xr-x 1000/100          0 2002-12-31 23:00:00 ./
+        \\-rw-r--r-- 1000/100          2 2000-12-31 23:00:00 ./a
+        \\crw-r--r-- 0/0             1,3 1999-01-01 00:00:00.5 ./dev
+        \\-rw-r--r-- 1000/100          0 1969-12-31 00:00:00 ./we ird\\nname
+        \\tar: ./we ird: implausibly old time stamp 1969-12-31 00:00:00
+        \\
+    ;
+    try std.testing.expectEqual(@as(i64, 1041375600), maxListedMtime(listing));
+    try std.testing.expectEqual(@as(i64, 0), maxListedMtime(""));
+    try std.testing.expectEqual(@as(?i64, -86400), parseUtcTimestamp("1969-12-31", "00:00:00"));
+    try std.testing.expectEqual(@as(?i64, 951782400), parseUtcTimestamp("2000-02-29", "00:00:00"));
+}
+
 fn hostPathExists(io: std.Io, path: []const u8) !bool {
     std.Io.Dir.accessAbsolute(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
@@ -1239,8 +1333,7 @@ fn hostPathExists(io: std.Io, path: []const u8) !bool {
 
 fn localFetchPath(url: []const u8) ?[]const u8 {
     if (std.fs.path.isAbsolute(url)) return url;
-    if (std.mem.startsWith(u8, url, "file://")) return url["file://".len..];
-    return null;
+    return url_mod.filePath(url);
 }
 
 fn stripMercurialDirtySuffix(rev: []const u8) []const u8 {
@@ -1648,4 +1741,72 @@ test "remote URL retries transient status then reuses the verified TTL cache" {
     try testing.expect(second.cached);
     try testing.expectEqualStrings(first.hash, second.hash);
     try testing.expectEqualStrings(first.path, second.path);
+}
+
+test "tarballs strip only a lone top-level directory and report the newest mtime" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src/tree/sub");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/tree/a", .data = "a" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/tree/sub/b", .data = "b" });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    const run = struct {
+        fn run(cwd: []const u8, argv: []const []const u8) !void {
+            const result = try std.process.run(testing.allocator, testing.io, .{ .argv = argv, .cwd = .{ .path = cwd } });
+            defer testing.allocator.free(result.stdout);
+            defer testing.allocator.free(result.stderr);
+            switch (result.term) {
+                .exited => |code| try testing.expectEqual(@as(u8, 0), code),
+                else => return error.UnexpectedCommandFailure,
+            }
+        }
+    }.run;
+    // Files in 2001, the top directory in 2003 (set last: creating entries
+    // bumps a directory's mtime).
+    try run(root, &.{ "touch", "-d", "@978307200", "src/tree/a", "src/tree/sub/b", "src/tree/sub" });
+    try run(root, &.{ "touch", "-d", "@1041379200", "src/tree" });
+    try run(root, &.{ "tar", "--format=gnu", "-cf", "top.tar", "-C", "src", "tree" });
+    try run(root, &.{ "tar", "--format=gnu", "-cf", "dot.tar", "-C", "src/tree", "." });
+    try run(root, &.{ "tar", "--format=gnu", "-cf", "flat.tar", "-C", "src/tree", "a", "sub" });
+
+    var files = FileCache.init(testing.allocator);
+    defer files.deinit();
+    files.setIo(testing.io);
+    var fc = try FetchCache.init(testing.allocator, .{});
+    defer fc.deinit();
+    fc.setIo(testing.io);
+    const cache_path = try std.fs.path.join(testing.allocator, &.{ root, "fetch-cache" });
+    defer testing.allocator.free(cache_path);
+    try fc.setCacheRoot(cache_path);
+
+    // The stripped directory and a `./` entry count towards lastModified.
+    const cases = [_]struct { []const u8, i64 }{
+        .{ "top.tar", 1041379200 },
+        .{ "dot.tar", 1041379200 },
+        .{ "flat.tar", 978307200 },
+    };
+    for (cases) |case| {
+        const url = try std.fmt.allocPrint(testing.allocator, "file://{s}/{s}", .{ root, case[0] });
+        defer testing.allocator.free(url);
+        for (0..2) |_| { // extracted, then from the cache
+            const result = try fc.fetchTarball(&files, .{ .url = url, .name = "source" }, null);
+            defer result.deinit(testing.allocator);
+            try testing.expectEqual(case[1], result.last_modified);
+            var dir = try std.Io.Dir.openDirAbsolute(testing.io, result.path, .{ .iterate = true });
+            defer dir.close(testing.io);
+            var names: [2]bool = .{ false, false };
+            var count: usize = 0;
+            var it = dir.iterate();
+            while (try it.next(testing.io)) |entry| {
+                count += 1;
+                if (std.mem.eql(u8, entry.name, "a")) names[0] = true;
+                if (std.mem.eql(u8, entry.name, "sub")) names[1] = true;
+            }
+            try testing.expectEqual(@as(usize, 2), count);
+            try testing.expect(names[0] and names[1]);
+        }
+    }
 }

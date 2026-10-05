@@ -105,6 +105,9 @@ pub const DaemonStore = struct {
     /// `error.DaemonError`. Freed on deinit / overwritten on the next error.
     last_error: ?[]u8 = null,
     suppress_build_output: bool = false,
+    /// An operation failed in a way that leaves the protocol stream in an
+    /// unknown state, so the connection must not be reused (see `usable`).
+    broken: bool = false,
     /// Set during `buildPaths` to forward typed activities and logs to the CLI.
     /// The protocol layer never writes presentation output itself.
     build_sink: ?BuildSink = null,
@@ -269,6 +272,7 @@ pub const DaemonStore = struct {
     /// `text:sha256` scheme (same addressing as `builtins.toFile`/`.drv`
     /// paths).
     pub fn addTextToStore(self: *DaemonStore, allocator: std.mem.Allocator, name: []const u8, text: []const u8, references: []const []const u8) ![]u8 {
+        errdefer self.broken = true; // framed: see `usable`
         try self.beginOp(.add_to_store);
         try wire.writeString(self.w(), name);
         try wire.writeString(self.w(), "text:sha256");
@@ -285,6 +289,7 @@ pub const DaemonStore = struct {
     /// `store.nar.serialize`). Returns the resulting store path (owned by
     /// `allocator`). Idempotent.
     pub fn addPath(self: *DaemonStore, allocator: std.mem.Allocator, name: []const u8, nar_bytes: []const u8, references: []const []const u8) ![]u8 {
+        errdefer self.broken = true; // framed: see `usable`
         try self.beginOp(.add_to_store);
         try wire.writeString(self.w(), name);
         // `fixed:r:sha256` = fixed-output, recursive (NAR) ingestion, sha256 —
@@ -320,6 +325,7 @@ pub const DaemonStore = struct {
     /// content-addressed as `fixed:sha256` (flat) — the addressing
     /// `builtins.fetchurl` uses. Returns the store path (owned by `allocator`).
     pub fn addFlatFile(self: *DaemonStore, allocator: std.mem.Allocator, name: []const u8, bytes: []const u8, references: []const []const u8) ![]u8 {
+        errdefer self.broken = true; // framed: see `usable`
         try self.beginOp(.add_to_store);
         try wire.writeString(self.w(), name);
         try wire.writeString(self.w(), "fixed:sha256"); // flat (no `r:`)
@@ -423,14 +429,30 @@ pub const DaemonStore = struct {
 
     // --- op plumbing ------------------------------------------------------
 
+    /// Whether the connection can take another operation. A daemon error
+    /// reported for a complete request leaves it in sync; a transport or
+    /// protocol failure doesn't, and neither does an error in an operation
+    /// that streams framed data: the daemon may reject the request before
+    /// reading the frames, which it then reads as the next operations.
+    pub fn usable(self: *const DaemonStore) bool {
+        return !self.broken;
+    }
+
     fn beginOp(self: *DaemonStore, op: wire.Op) !void {
+        errdefer self.broken = true;
         try wire.writeInt(self.w(), @intFromEnum(op));
     }
 
     /// Flush the request and drain the STDERR_* sideband up to the response.
     fn flushAndDrain(self: *DaemonStore) !void {
-        try self.w().flush();
-        try self.processStderr();
+        self.w().flush() catch |err| {
+            self.broken = true;
+            return err;
+        };
+        self.processStderr() catch |err| {
+            if (err != error.DaemonError) self.broken = true;
+            return err;
+        };
     }
 
     /// Consume the STDERR_* message stream until STDERR_LAST. During builds,

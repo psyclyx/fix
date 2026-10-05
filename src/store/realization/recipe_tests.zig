@@ -708,6 +708,31 @@ test "permanent realization failure is replayed without a second writer" {
     } else return error.MissingClosureRealizationApi;
 }
 
+test "a write the daemon rejects before reading it leaves no stale connection" {
+    if (comptime realizationApiAvailable()) {
+        var fake = try FakeDaemon.start(std.testing.allocator, std.testing.io);
+        defer fake.deinit();
+        fake.rejectNextAddEarly();
+        var store = RealizationStore.init(std.testing.allocator);
+        defer store.deinit();
+        store.setIo(std.testing.io);
+        store.testAccess().useBorrowedDaemonSocket(fake.socketPath());
+        const rt = std.testing.allocator.create(DaemonRuntime) catch @panic("OOM");
+        rt.* = DaemonRuntime.init();
+        // One connection, so the next write would reuse the rejected one's.
+        rt.pool_workers = 1;
+        store.testAccess().takeDaemonRuntime(rt);
+        try store.recordOwnedTextRecipe(root_path, try owned(std.testing.allocator, "rejected"), &.{});
+        try store.recordOwnedTextRecipe(dep_text_path, try owned(std.testing.allocator, "accepted"), &.{});
+
+        try std.testing.expectError(error.DaemonError, store.ensureClosure(root_path));
+        // The unread payload is still in that connection; the next write
+        // must not be sent after it.
+        try store.ensureClosure(dep_text_path);
+        try std.testing.expectEqual(@as(usize, 1), fake.count(.text));
+    } else return error.MissingClosureRealizationApi;
+}
+
 test "transient connection failure resets claim state and permits retry" {
     if (comptime realizationApiAvailable()) {
         const socket_path = try FakeDaemon.makeFilesystemSocketPath(std.testing.allocator);

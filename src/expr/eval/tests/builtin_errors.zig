@@ -180,3 +180,24 @@ test "effectful thunk bodies do not enter the pure result memo" {
     try std_testing.expectEqualStrings("call", capture.message(0));
     try std_testing.expectEqualStrings("call", capture.message(1));
 }
+
+test "throw and abort coerce their message like string interpolation" {
+    const cases = [_][]const u8{
+        "(builtins.tryEval (builtins.throw { __toString = _: \"x\"; })).success",
+        "(builtins.tryEval (builtins.throw { outPath = \"/x\"; })).success",
+        "(builtins.tryEval (builtins.throw (builtins.derivation { name = \"d\"; system = \"x\"; builder = \"/b\"; }))).success",
+    };
+    for (cases) |case| {
+        const caught = try renderForTest(case);
+        defer std_testing.allocator.free(caught);
+        try std_testing.expectEqualStrings("false", caught);
+    }
+    // A path is copied to the store like "${./path}".
+    const path = try @import("../test_helpers.zig").renderForTestFromCurrentPath("(builtins.tryEval (builtins.throw ./build.zig.zon)).success");
+    defer std_testing.allocator.free(path);
+    try std_testing.expectEqualStrings("false", path);
+
+    try std_testing.expectError(error.NixAbort, renderForTest("builtins.abort { outPath = \"/x\"; }"));
+    // What interpolation rejects is a type error, which tryEval doesn't catch.
+    try std_testing.expectError(error.TypeError, renderForTest("builtins.tryEval (builtins.throw 1)"));
+}

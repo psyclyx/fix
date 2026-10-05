@@ -206,6 +206,7 @@ pub fn build(b: *std.Build) void {
     cli_mod.addImport("runtime", runtime_mod);
     cli_mod.addImport("syntax", syntax_mod);
     cli_mod.addImport("store", store_mod);
+    cli_mod.addImport("fetchers", fetchers_mod);
     cli_mod.addImport("build_options", build_options_mod);
 
     const process_support_mod = b.createModule(.{

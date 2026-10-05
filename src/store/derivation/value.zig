@@ -81,12 +81,6 @@ fn buildSelectedValue(
         .name = try intern.intern("drvPath"),
         .value = try drvPathString(intern, heap, spec.drv_path),
     });
-    if (spec.explicit_outputs) {
-        try entries.append(allocator, .{
-            .name = try intern.intern("outputs"),
-            .value = Value.list(try outputNamesList(allocator, heap, spec.outputs)),
-        });
-    }
     try entries.append(allocator, .{
         .name = try intern.intern("drvAttrs"),
         .value = Value.attrs(try heap.addAttrsView(spec.original_attrs)),
@@ -109,9 +103,18 @@ fn buildSelectedValue(
             .value = output_value,
         });
     }
+    const all = try allocator.alloc(Value, if (spec.declared.len != 0) spec.declared.len else spec.outputs.len);
+    defer allocator.free(all);
+    if (spec.declared.len != 0) {
+        for (spec.declared, all) |name, *value| {
+            for (spec.outputs, nested_output_values) |output, output_value| {
+                if (output.name == name) value.* = output_value;
+            }
+        }
+    } else @memcpy(all, nested_output_values);
     try entries.append(allocator, .{
         .name = try intern.intern("all"),
-        .value = Value.list(try heap.addList(nested_output_values)),
+        .value = Value.list(try heap.addList(all)),
     });
 
     return Value.attrs(try heap.addAttrs(entries.items));
@@ -159,7 +162,9 @@ fn buildOutputReferenceValue(
 }
 
 pub fn isSyntheticName(intern: *InternTable, name: []const u8, outputs: []const ValueOutput) bool {
-    const synthetic = [_][]const u8{ "type", "outputName", "outPath", "drvPath", "drvAttrs", "outputs", "all" };
+    // Not `outputs`: the value has the `outputs` it was given, as in Nix's
+    // `derivation.nix` (`drvAttrs // …`).
+    const synthetic = [_][]const u8{ "type", "outputName", "outPath", "drvPath", "drvAttrs", "all" };
     for (synthetic) |candidate| {
         if (std.mem.eql(u8, name, candidate)) return true;
     }
@@ -167,17 +172,6 @@ pub fn isSyntheticName(intern: *InternTable, name: []const u8, outputs: []const 
         if (std.mem.eql(u8, name, intern.get(output.name))) return true;
     }
     return false;
-}
-
-fn outputNamesList(
-    allocator: std.mem.Allocator,
-    heap: *ObjectHeap,
-    outputs: []const ValueOutput,
-) !heap_mod.ObjectId {
-    const values = try allocator.alloc(Value, outputs.len);
-    defer allocator.free(values);
-    for (outputs, values) |output, *value| value.* = Value.string(output.name);
-    return heap.addList(values);
 }
 
 fn drvPathString(
@@ -201,6 +195,7 @@ fn outputPathString(
     drv_path: InternId,
     output: ValueOutput,
 ) !Value {
+    if (output.missing) |missing| return missing;
     const output_values = [_]Value{Value.string(output.name)};
     const outputs = [_]AttrEntry{
         .{ .name = try intern.intern("outputs"), .value = Value.list(try heap.addList(&output_values)) },

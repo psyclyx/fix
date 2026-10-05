@@ -90,7 +90,7 @@ pub fn completeFlakeAttrs(
     ev.setParallelismToggles(true, true);
     _ = try session.configure(init, &options, &settings);
 
-    const source = try eval_support.lowerFlakeCompletion(&ev, flake_ref, parts.parent);
+    const source = try eval_support.lowerFlakeCompletion(&ev, init.io, flake_ref, parts.parent);
     defer ev.hostAllocator().free(source);
     const value = try ev.evaluate(source);
     const name_prefix = prefix[0 .. hash + 1 + parts.stem_len];

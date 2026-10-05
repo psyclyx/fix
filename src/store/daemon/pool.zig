@@ -33,6 +33,10 @@ pub const Backend = struct {
     ctx: *anyopaque,
     open: *const fn (ctx: *anyopaque) anyerror!*anyopaque,
     close: *const fn (ctx: *anyopaque, conn: *anyopaque) void,
+    /// Whether a connection can run another job. One that can't (a failed
+    /// operation left its protocol state unknown) is closed after the job,
+    /// and the next job opens a fresh one.
+    usable: ?*const fn (ctx: *anyopaque, conn: *anyopaque) bool = null,
 };
 
 pub const DaemonPool = struct {
@@ -157,6 +161,10 @@ pub const DaemonPool = struct {
 
             if (conn == null) conn = self.backend.open(self.backend.ctx) catch null;
             job.run(conn, job.ctx);
+            if (conn) |c| if (self.backend.usable) |usable| if (!usable(self.backend.ctx, c)) {
+                self.backend.close(self.backend.ctx, c);
+                conn = null;
+            };
         }
     }
 };
@@ -221,4 +229,41 @@ test "daemon pool: warm workers drain all submitted jobs on live connections" {
     // Every worker opened exactly one warm connection and closed it.
     try testing.expectEqual(@as(usize, 4), mock.opens.load(.monotonic));
     try testing.expectEqual(@as(usize, 4), mock.closes.load(.monotonic));
+}
+
+test "daemon pool: an unusable connection is replaced before the next job" {
+    const alloc = testing.allocator;
+    const Breaking = struct {
+        mock: MockBackend,
+        /// Set by the job that breaks its connection.
+        broke: bool = false,
+        opens_seen: [3]usize = .{ 0, 0, 0 },
+        next: usize = 0,
+
+        fn usable(ctx: *anyopaque, _: *anyopaque) bool {
+            const mock: *MockBackend = @ptrCast(@alignCast(ctx));
+            const self: *@This() = @fieldParentPtr("mock", mock);
+            defer self.broke = false;
+            return !self.broke;
+        }
+        fn run(conn: ?*anyopaque, ctx: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            std.debug.assert(conn != null);
+            self.opens_seen[self.next] = self.mock.opens.load(.monotonic);
+            self.broke = self.next == 0;
+            self.next += 1;
+        }
+    };
+    var state: Breaking = .{ .mock = .{ .allocator = alloc } };
+    var backend = state.mock.backend();
+    backend.usable = Breaking.usable;
+    var pool = DaemonPool.init(alloc, backend, 1);
+    try pool.start();
+    for (0..3) |_| pool.submitBlocking(Breaking.run, &state);
+    pool.deinit();
+
+    // Job 0 broke its connection, so job 1 ran on a new one, which job 2
+    // reused.
+    try testing.expectEqualSlices(usize, &.{ 1, 2, 2 }, &state.opens_seen);
+    try testing.expectEqual(@as(usize, 2), state.mock.closes.load(.monotonic));
 }

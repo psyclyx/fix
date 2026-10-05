@@ -56,7 +56,7 @@ echo '{ outputs = i: { v = 2; }; }' >"$b/flake.nix"
 cat >"$r2/flake.nix" <<EOF
 { inputs.a.url = "path:$a"; inputs.b.url = "path:$b"; outputs = i: { x = 1; }; }
 EOF
-anode() { grep -A3 "\"$1\":" "$r2/flake.lock" | grep -o '"narHash":"[^"]*"' | head -1; }
+anode() { grep -A3 "\"$1\": {" "$r2/flake.lock" | grep -o '"narHash": *"[^"]*"' | head -1; }
 
 out=$(cd "$r2" && $FIX flake lock $FF 2>&1)
 t "lock: reports written" "wrote flake.lock" "$out"
