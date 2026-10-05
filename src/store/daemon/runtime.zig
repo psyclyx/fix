@@ -64,6 +64,17 @@ pub const DaemonRuntime = struct {
         return self.driver();
     }
 
+    /// The daemon driver, once its pool is running. A client that detached this
+    /// runtime and attached it again reuses the started pool through this:
+    /// `configureDaemon` refuses to reconfigure a backend that has started, and
+    /// the pool it left running would otherwise be unreachable.
+    pub fn startedDriver(self: *DaemonRuntime) ?backend.Driver {
+        self.pool_mu.lock();
+        defer self.pool_mu.unlock();
+        if (!self.pool_started) return null;
+        return self.driver();
+    }
+
     /// Install the evaluator capability that parks fibers around daemon-pool
     /// work. Tests and non-evaluator callers leave this null and block instead.
     pub fn setExecutor(self: *DaemonRuntime, executor: ?daemon_execution.Executor) void {
