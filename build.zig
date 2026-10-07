@@ -176,7 +176,6 @@ pub fn build(b: *std.Build) void {
     fetchers_mod.addImport("store", store_mod);
     fetchers_mod.addImport("zurl", zurl_mod);
     fetchers_mod.addImport("ziggit", ziggit_mod);
-    fetchers_mod.link_libc = true;
 
     const expr_mod = b.addModule("expr", .{
         .root_source_file = b.path("src/expr/root.zig"),
