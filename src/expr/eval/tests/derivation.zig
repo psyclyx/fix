@@ -346,6 +346,34 @@ test "evaluate minimal derivation builtins" {
     defer std.testing.allocator.free(structured_explicit_outputs);
     try std.testing.expectEqualStrings("\"[\\\"/nix/store/5nkc970vb573fs2ppl4vflsymcrri8dn-pkg-structured.drv\\\",\\\"/nix/store/j9jfd9axp7wyhrx9mg088db3iw19dkyw-pkg-structured\\\",\\\"/nix/store/470amnhnd10jpqrh3im85xr0bicjb8rm-pkg-structured-debug\\\"]\"", structured_explicit_outputs);
 
+    const structured_output_named_attrs = try renderForTest(
+        \\let
+        \\  pkg = builtins.derivation {
+        \\    name = "pkg-structured";
+        \\    outputs = [ "out" "debug" ];
+        \\    system = "x86_64-linux";
+        \\    builder = "/bin/sh";
+        \\    __structuredAttrs = true;
+        \\    out = builtins.placeholder "out";
+        \\    debug = "kept";
+        \\  };
+        \\in builtins.toJSON [ pkg.drvPath pkg.outPath pkg.debug.outPath ]
+    );
+    defer std.testing.allocator.free(structured_output_named_attrs);
+
+    const structured_control_chars = try renderForTest(
+        \\(builtins.derivation {
+        \\  name = "pkg-structured";
+        \\  system = "x86_64-linux";
+        \\  builder = "/bin/sh";
+        \\  __structuredAttrs = true;
+        \\  text = builtins.fromJSON "\"\\u001b[0m\\b\\f\\u0001\\u007f\"";
+        \\}).drvPath
+    );
+    defer std.testing.allocator.free(structured_control_chars);
+    try std.testing.expectEqualStrings("\"/nix/store/15d05adwgqya43qk6rpk1r4ybzii4wlm-pkg-structured.drv\"", structured_control_chars);
+    try std.testing.expectEqualStrings("\"[\\\"/nix/store/q83gbb79ilmqjwjil3nks4sx5vy7jaah-pkg-structured.drv\\\",\\\"/nix/store/zqglb1f6zsrjkjjmiqrbvicaxakj3nyp-pkg-structured\\\",\\\"/nix/store/0yv1n7mj0vcqbsaharqj0dph70sh3isp-pkg-structured-debug\\\"]\"", structured_output_named_attrs);
+
     var recursive_structured_ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
     defer recursive_structured_ev.deinit();
     try std.testing.expectError(
@@ -452,6 +480,18 @@ test "derivation builtin rejects wrong-typed required attrs" {
         error.TypeError,
         renderForTest("(builtins.derivation { name = \"pkg\"; system = \"x86_64-linux\"; builder = \"/bin/sh\"; args = \"not-a-list\"; }).outPath"),
     );
+}
+
+test "structured derivation rejects a __json attribute" {
+    try std.testing.expectError(error.InvalidDerivation, renderForTest(
+        \\(builtins.derivation {
+        \\  name = "foo";
+        \\  system = ":";
+        \\  builder = ":";
+        \\  __structuredAttrs = true;
+        \\  __json = "foo";
+        \\}).drvPath
+    ));
 }
 
 test "derivation builtin rejects invalid outputs list" {

@@ -26,7 +26,7 @@ pub const DrvView = struct {
 // byte with a switch. Same shape as the string-literal scanner's skipToAnyOf.
 const vec_len: comptime_int = std.simd.suggestVectorLength(u8) orelse 0;
 const EscVec = @Vector(vec_len, u8);
-const EscMask = std.meta.Int(.unsigned, if (vec_len == 0) 1 else vec_len);
+const EscMask = @Int(.unsigned, if (vec_len == 0) 1 else vec_len);
 
 inline fn escMaskEq(v: EscVec, comptime c: u8) EscMask {
     return @bitCast(v == @as(EscVec, @splat(c)));

@@ -20,7 +20,7 @@ test "successful evaluation retains unsilenced parser deprecations" {
     );
 
     var policy: policy_mod.LanguagePolicy = .{};
-    policy.applyFeatureSets(.initEmpty(), .initOne(.floating_without_zero));
+    policy.applyFeatureSets(.empty, .initOne(.floating_without_zero));
     ev.configureLanguage(policy);
     _ = try ev.evaluate(".5");
     try std.testing.expectEqual(@as(usize, 0), ev.getDiagnostics().len);
@@ -212,4 +212,15 @@ test "cached import failures retain their original diagnostics" {
         }
         try std.testing.expect(found_import_origin);
     }
+}
+
+test "attrset pattern errors name the argument" {
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+
+    try std.testing.expectError(error.MissingAttribute, ev.evaluate("({ x, y }: x) { x = 1; }"));
+    try std.testing.expectEqualStrings("function called without required argument 'y'", ev.getTrace().message.?);
+
+    try std.testing.expectError(error.UnexpectedAttribute, ev.evaluate("({ x }: x) { x = 1; z = 2; }"));
+    try std.testing.expectEqualStrings("function called with unexpected argument 'z'", ev.getTrace().message.?);
 }

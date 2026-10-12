@@ -79,7 +79,7 @@ pub const FailureRef = struct {
     }
 
     pub fn err(self: FailureRef) anyerror {
-        const ErrorInt = std.meta.Int(.unsigned, @bitSizeOf(anyerror));
+        const ErrorInt = @Int(.unsigned, @bitSizeOf(anyerror));
         if (!self.isDetailed()) return @errorFromInt(@as(ErrorInt, @intCast(self.bits >> 1)));
 
         var current = self;

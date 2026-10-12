@@ -95,8 +95,8 @@ fn scanFlush() void {
     if (comptime !scan_census_on) return;
     while (scan_totals_mu.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) std.atomic.spinLoopHint();
     defer scan_totals_mu.store(0, .release);
-    inline for (@typeInfo(ScanCensus).@"struct".fields) |f| {
-        @field(scan_totals, f.name) += @field(scan_local, f.name);
+    inline for (@typeInfo(ScanCensus).@"struct".field_names) |f| {
+        @field(scan_totals, f) += @field(scan_local, f);
     }
     scan_local = .{};
 }
@@ -1265,12 +1265,13 @@ pub const Scheduler = struct {
         @setEvalBranchQuota(8000);
         const hot = .{ "next_victim", "next_fiber_id", "pending_tasks", "spinners", "ready_pending", "urgent_pending", "novel_mask", "spec_mask" };
         const blk = std.atomic.cache_line;
-        for (@typeInfo(Scheduler).@"struct".fields) |f| {
-            if (@sizeOf(f.type) == 0) continue;
-            const lo = @offsetOf(Scheduler, f.name) / blk;
-            const hi = (@offsetOf(Scheduler, f.name) + @sizeOf(f.type) - 1) / blk;
+        const scheduler_info = @typeInfo(Scheduler).@"struct";
+        for (scheduler_info.field_names, scheduler_info.field_types) |field_name, field_type| {
+            if (@sizeOf(field_type) == 0) continue;
+            const lo = @offsetOf(Scheduler, field_name) / blk;
+            const hi = (@offsetOf(Scheduler, field_name) + @sizeOf(field_type) - 1) / blk;
             for (hot) |h| {
-                if (std.mem.eql(u8, f.name, h)) continue;
+                if (std.mem.eql(u8, field_name, h)) continue;
                 const h_blk = @offsetOf(Scheduler, h) / blk;
                 std.debug.assert(lo > h_blk or hi < h_blk);
             }

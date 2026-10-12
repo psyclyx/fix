@@ -734,7 +734,7 @@ fn createTestCommit(allocator: std.mem.Allocator, io: std.Io, repository_path: [
     // `stageWorktree` skips `.git`, so the object database this writes into
     // is never itself staged even though it lives under the directory being
     // walked.
-    var index = try ziggit.stageWorktree(allocator, io, dir, &repo.odb, repo.format);
+    var index = try ziggit.stageWorktree(allocator, io, dir, &repo.odb, repo.format, .{});
     defer index.deinit();
     try ziggit.writeWorktreeIndex(index, io, repo.layout.git_dir, repo.format);
     const tree_oid = try ziggit.writeTreeFromIndex(allocator, &repo.odb, index, &diag);

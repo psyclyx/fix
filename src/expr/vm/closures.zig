@@ -654,7 +654,7 @@ pub fn doCallN(self: *VM, n: u16) !void {
     // stack at [base, base+n) — precise GC roots — for the call's duration.
     if (callee.isBuiltin()) {
         const builtin_id = callee.asBuiltinId();
-        if (n <= rt_builtins.arity(@enumFromInt(builtin_id))) {
+        if (n <= rt_builtins.arity(@fromBackingInt(@intCast(builtin_id)))) {
             const result = try access.applyBuiltin(self, builtin_id, self.stack[base .. base + n]);
             self.sp = base - 1;
             try stack.push(self, result);
@@ -695,7 +695,7 @@ pub fn doTailCallN(self: *VM, n: u16) !void {
     // one-arg-at-a-time fold and its throwaway partials.
     if (callee.isBuiltin()) {
         const builtin_id = callee.asBuiltinId();
-        if (n <= rt_builtins.arity(@enumFromInt(builtin_id))) {
+        if (n <= rt_builtins.arity(@fromBackingInt(@intCast(builtin_id)))) {
             const result = try access.applyBuiltin(self, builtin_id, self.stack[base .. base + n]);
             self.sp = base - 1;
             try stack.push(self, result);

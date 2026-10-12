@@ -74,11 +74,11 @@ pub fn write(
 
     const bucket_lims = [_]u64{ 4, 8, 16, 32, 128, 512, 2048, 8192, std.math.maxInt(u64) };
     const bucket_names = [_][]const u8{ "<=4B", "<=8B", "<=16B", "<=32B", "<=128B", "<=512B", "<=2KB", "<=8KB", ">8KB" };
-    var buckets = [_]StatRow{.{}} ** bucket_lims.len;
+    var buckets: [bucket_lims.len]StatRow = @splat(.{});
 
     var cats = std.enums.EnumArray(ChunkCategory, StatRow).initFill(.{});
-    var op_counts = [_]u64{0} ** opcode_mod.count;
-    var op_bytes = [_]u64{0} ** opcode_mod.count;
+    var op_counts: [opcode_mod.count]u64 = @splat(0);
+    var op_bytes: [opcode_mod.count]u64 = @splat(0);
 
     var pos_sites: u64 = 0;
     var pos_entries: u64 = 0;
@@ -143,7 +143,7 @@ pub fn write(
                 only_const = false;
                 continue;
             }
-            const op: OpCode = @enumFromInt(op_byte);
+            const op: OpCode = @fromBackingInt(@intCast(op_byte));
             const start = ip;
             ip += 1;
             // Length-only pass: no rendering, straight from the operand-shape
@@ -188,16 +188,16 @@ pub fn write(
     }
 
     try writer.writeAll("\ncategories              count       bytes\n");
-    inline for (@typeInfo(ChunkCategory).@"enum".fields) |f| {
-        const row = cats.get(@field(ChunkCategory, f.name));
-        if (row.count > 0) try writer.print("  {s:<20} {d:>10} {d:>11}\n", .{ f.name, row.count, row.bytes });
+    inline for (@typeInfo(ChunkCategory).@"enum".field_names) |f| {
+        const row = cats.get(@field(ChunkCategory, f));
+        if (row.count > 0) try writer.print("  {s:<20} {d:>10} {d:>11}\n", .{ f, row.count, row.bytes });
     }
     if (empty_attrs_chunks > 0) try writer.print("  (of const_builder: empty-attrs chunks {d})\n", .{empty_attrs_chunks});
 
     // Top mnemonics by count.
     try writer.writeAll("\ntop mnemonics           count       bytes\n");
     var shown: usize = 0;
-    var used = [_]bool{false} ** opcode_mod.count;
+    var used: [opcode_mod.count]bool = @splat(false);
     while (shown < 15) : (shown += 1) {
         var best: usize = 0;
         var best_count: u64 = 0;
@@ -209,7 +209,7 @@ pub fn write(
         }
         if (best_count == 0) break;
         used[best] = true;
-        try writer.print("  {s:<20} {d:>10} {d:>11}\n", .{ @tagName(@as(OpCode, @enumFromInt(best))), op_counts[best], op_bytes[best] });
+        try writer.print("  {s:<20} {d:>10} {d:>11}\n", .{ @tagName(@as(OpCode, @fromBackingInt(@intCast(best)))), op_counts[best], op_bytes[best] });
     }
 
     if (total.bytes > 0) {

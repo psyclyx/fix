@@ -12,7 +12,7 @@ const testing = std.testing;
 
 pub const std_options: std.Options = .{
     .enable_segfault_handler = false,
-    // Zig's DebugAllocator captures a backtrace for every testing-allocator
+    // Zig's SafeAllocator captures a backtrace for every testing-allocator
     // operation. Darwin's unwinder does not safely traverse the evaluator's
     // mmap-backed switched stacks and can fault during those allocations.
     // Empty allocation traces retain allocator identity, safety checks, and
@@ -34,14 +34,14 @@ pub fn main(init: std.process.Init.Minimal) void {
     var leaked: usize = 0;
 
     for (test_fns, 0..) |test_fn, index| {
-        testing.allocator_instance = .{};
+        testing.allocator_instance = .init(std.heap.page_allocator, .{});
         testing.io_instance = .init(testing.allocator, .{
             .argv0 = .init(init.args),
             .environ = init.environ,
         });
         defer {
             testing.io_instance.deinit();
-            if (testing.allocator_instance.deinit() == .leak) leaked += 1;
+            if (testing.allocator_instance.deinit() != 0) leaked += 1;
         }
         testing.log_level = .warn;
         testing.environ = init.environ;
@@ -85,10 +85,10 @@ fn log(
     args: anytype,
 ) void {
     @disableInstrumentation();
-    if (@intFromEnum(message_level) <= @intFromEnum(std.log.Level.err)) {
+    if (@backingInt(message_level) <= @backingInt(std.log.Level.err)) {
         log_err_count +|= 1;
     }
-    if (@intFromEnum(message_level) <= @intFromEnum(testing.log_level)) {
+    if (@backingInt(message_level) <= @backingInt(testing.log_level)) {
         std.debug.print(
             "[" ++ @tagName(scope) ++ "] (" ++ @tagName(message_level) ++ "): " ++ format ++ "\n",
             args,

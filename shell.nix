@@ -26,7 +26,7 @@ pkgs.mkShell {
   CPATH = "${tsanSccShim}";
 
   packages = [
-    pkgs.zig_0_16
+    pkgs.zig_0_17
     pkgs.tlaplus
     pkgs.coreutils
     pkgs.pkg-config

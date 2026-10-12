@@ -18,7 +18,7 @@ pub const ProgressPolicy = struct {
 
 /// Every accepted `WHEN` spelling, so argument parsing can recognize the value
 /// set without restating it.
-pub const when_words = std.meta.fieldNames(When);
+pub const when_words = @typeInfo(When).@"enum".field_names;
 
 pub fn parseWhen(text: []const u8) ?When {
     return std.meta.stringToEnum(When, text);
@@ -162,7 +162,7 @@ pub fn foreground(writer: *std.Io.Writer, color_depth: ColorDepth, color: Rgb, b
 
 pub fn verbColor(verb: Verb) Rgb {
     const hues = [_]usize{ 4, 1, 2, 7, 17, 5 };
-    return terminal_color.hueColor(hues[@intFromEnum(verb)]);
+    return terminal_color.hueColor(hues[@backingInt(verb)]);
 }
 
 pub fn nounColor(noun: []const u8) Rgb {
@@ -252,8 +252,8 @@ test "log identity colors avoid ANSI error and warning slots" {
         try std.testing.expect(code != 31 and code != 91);
         try std.testing.expect(code != 33 and code != 93);
     }
-    inline for (std.meta.fields(Verb)) |field| {
-        const code = terminal_color.ansi16Code(verbColor(@enumFromInt(field.value)), false);
+    inline for (@typeInfo(Verb).@"enum".field_values) |field_value| {
+        const code = terminal_color.ansi16Code(verbColor(@fromBackingInt(@intCast(field_value))), false);
         try std.testing.expect(code != 31 and code != 91);
         try std.testing.expect(code != 33 and code != 93);
     }

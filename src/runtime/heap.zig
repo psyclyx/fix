@@ -25,7 +25,7 @@ const types = @import("types.zig");
 /// slot's alloc-bit is set — so a collection that frees a still-live object
 /// traps at the first stale read with a stack trace, instead of a
 /// nondeterministic segfault much later. Off in ReleaseFast (production).
-pub const gc_debug = builtin.mode == .ReleaseSafe;
+pub const gc_debug = builtin.mode == .safe;
 const segments = @import("base").segments;
 const hugetlb = @import("base").hugetlb;
 const sync = @import("base").sync;
@@ -165,7 +165,7 @@ comptime {
     // Future state word, effect_group in the side table) => Object 56->48.
     // ReleaseFast only - Debug carries union safety tags, prof builds carry
     // census fields. If this fires, a field crept back in.
-    if (@import("builtin").mode == .ReleaseFast and !@import("build_options").prof_main) {
+    if (@import("builtin").mode == .fast and !@import("build_options").prof_main) {
         std.debug.assert(@sizeOf(Thunk) == 40);
         std.debug.assert(@sizeOf(Object) == 48);
     }

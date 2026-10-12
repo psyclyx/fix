@@ -132,7 +132,7 @@ pub const Sample = struct {
     cycles_inclusive: u64 = 0,
 };
 
-const path_count = @typeInfo(Path).@"enum".fields.len;
+const path_count = @typeInfo(Path).@"enum".field_names.len;
 
 /// Per-path counters. Main-thread-only writes; reads (for printing)
 /// happen after the eval finishes.
@@ -334,7 +334,7 @@ pub inline fn end(comptime path: Path, t: u64) void {
     if (frame.path != path) return;
     const inclusive = now - frame.start_tsc;
     const exclusive = inclusive - frame.child_exclusion;
-    const s = &samples[@intFromEnum(path)];
+    const s = &samples[@backingInt(path)];
     s.calls += 1;
     s.cycles += exclusive;
     s.cycles_inclusive += inclusive;
@@ -382,11 +382,12 @@ fn printAvgExcl(cycles: u64, calls: u64) void {
 /// age-at-force per-body breakdown (same shapes as `prof_path.report`).
 pub fn report(registry: *const ChunkRegistry, intern: *const InternTable) void {
     timebase.reportLine("prof");
-    inline for (@typeInfo(Path).@"enum".fields) |f| {
-        const samp = samples[f.value];
+    const path_info = @typeInfo(Path).@"enum";
+    inline for (path_info.field_names, path_info.field_values) |path_name, path_value| {
+        const samp = samples[path_value];
         if (samp.calls != 0) {
             std.debug.print("prof: {s}: excl_cy={d} incl_cy={d} calls={d}", .{
-                f.name,
+                path_name,
                 samp.cycles,
                 samp.cycles_inclusive,
                 samp.calls,
@@ -399,7 +400,7 @@ pub fn report(registry: *const ChunkRegistry, intern: *const InternTable) void {
     // Top builtins by inclusive cycles on main.
     const top_count = 40;
     const BSlot = struct { id: u16, cycles: u64, incl: u64, calls: u64 };
-    var top_b: [top_count]BSlot = .{BSlot{ .id = 0, .cycles = 0, .incl = 0, .calls = 0 }} ** top_count;
+    var top_b: [top_count]BSlot = @splat(.{ .id = 0, .cycles = 0, .incl = 0, .calls = 0 });
     for (builtin_samples, 0..) |samp, id| {
         if (samp.calls == 0) continue;
         var slot: usize = top_count;
@@ -418,7 +419,7 @@ pub fn report(registry: *const ChunkRegistry, intern: *const InternTable) void {
     std.debug.print("prof builtins (top-{d} by EXCL cycles — own-body cost):\n", .{top_count});
     for (top_b) |entry| {
         if (entry.cycles == 0) break;
-        const name = @import("runtime").builtins.displayName(@enumFromInt(entry.id));
+        const name = @import("runtime").builtins.displayName(@fromBackingInt(@intCast(entry.id)));
         std.debug.print("  {s}: excl={d} incl={d} calls={d}", .{ name, entry.cycles, entry.incl, entry.calls });
         printAvgExcl(entry.cycles, entry.calls);
     }

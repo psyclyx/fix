@@ -34,9 +34,9 @@ pub fn writeMixed(self: *Compiler, segments: []const Node.Atom, dynamic_count: u
     try self.builder.writeByte(self.allocator, try diagnostics.requireU8At(self, dynamic_count, atom, "attribute path has too many dynamic segments"));
     for (segments) |segment| {
         if (attr_names.hasInterpolation(self, segment)) {
-            try self.builder.writeByte(self.allocator, @intFromEnum(bytecode.MixedAttrSegmentTag.dynamic));
+            try self.builder.writeByte(self.allocator, @backingInt(bytecode.MixedAttrSegmentTag.dynamic));
         } else {
-            try self.builder.writeByte(self.allocator, @intFromEnum(bytecode.MixedAttrSegmentTag.static));
+            try self.builder.writeByte(self.allocator, @backingInt(bytecode.MixedAttrSegmentTag.static));
             try self.builder.writeU32(self.allocator, try attr_names.intern(self, segment));
         }
     }
@@ -53,12 +53,12 @@ pub fn writeHasAttrMixed(
     for (segments) |segment| switch (segment) {
         .static => |static_atom| {
             if (attr_names.hasInterpolation(self, static_atom)) {
-                try self.builder.writeByte(self.allocator, @intFromEnum(bytecode.MixedAttrSegmentTag.dynamic));
+                try self.builder.writeByte(self.allocator, @backingInt(bytecode.MixedAttrSegmentTag.dynamic));
             } else {
-                try self.builder.writeByte(self.allocator, @intFromEnum(bytecode.MixedAttrSegmentTag.static));
+                try self.builder.writeByte(self.allocator, @backingInt(bytecode.MixedAttrSegmentTag.static));
                 try self.builder.writeU32(self.allocator, try attr_names.intern(self, static_atom));
             }
         },
-        .dynamic => try self.builder.writeByte(self.allocator, @intFromEnum(bytecode.MixedAttrSegmentTag.dynamic)),
+        .dynamic => try self.builder.writeByte(self.allocator, @backingInt(bytecode.MixedAttrSegmentTag.dynamic)),
     };
 }

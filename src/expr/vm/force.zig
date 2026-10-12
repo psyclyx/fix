@@ -193,7 +193,7 @@ pub fn forceThunk(self: *VM, thunk_val: Value) !Value {
 pub inline fn profIsResolvedThunk(self: *VM, v: Value) bool {
     if (!v.isThunk()) return false;
     const thunk = self.heap.getThunkAssumeValid(v.asObjectId());
-    return @intFromEnum(thunk.future.stateField(.monotonic)) == @intFromEnum(future_mod.FutureState.resolved);
+    return @backingInt(thunk.future.stateField(.monotonic)) == @backingInt(future_mod.FutureState.resolved);
 }
 
 pub inline fn forceValue(self: *VM, value: Value) anyerror!Value {
@@ -293,7 +293,7 @@ fn derefForwarder(self: *VM, start: Value, demand: bool) anyerror!Value {
     var r = start;
     while (r.isThunk()) {
         const t = self.heap.getThunkAssumeValid(r.asObjectId());
-        if (@intFromEnum(t.future.stateField(.acquire)) != @intFromEnum(future_mod.FutureState.resolved))
+        if (@backingInt(t.future.stateField(.acquire)) != @backingInt(future_mod.FutureState.resolved))
             return forceValueImpl(self, r, demand);
         if (t.hasEffects()) try observeEffectGroup(self, self.heap.effect_groups.of(r.asObjectId()), demand and !self.speculation.active);
         if (demand) t.markDemanded();
@@ -513,7 +513,7 @@ pub inline fn forceAttrsAccelerate(self: *VM, attrs_id: ObjectId, entries: []con
 }
 
 pub fn enterDeep(self: *VM, kind: SeenDeepKind, id: ObjectId, seen: *SeenDeepSet) !bool {
-    const key = (@as(u64, @intFromEnum(kind)) << 32) | @as(u64, id);
+    const key = (@as(u64, @backingInt(kind)) << 32) | @as(u64, id);
     return !(try seen.getOrPut(self.allocator, key)).found_existing;
 }
 
@@ -607,7 +607,7 @@ pub inline fn forceTop(self: *VM) anyerror!Value {
 /// worst misclassifies, the claim CAS inside the force is authoritative.
 pub fn sweepMemberAdmissible(self: *VM, thunk_id: ObjectId) bool {
     const th = self.heap.getThunkAssumeValid(thunk_id);
-    if (@intFromEnum(th.future.stateField(.monotonic)) != @intFromEnum(future_mod.FutureState.unresolved)) return false;
+    if (@backingInt(th.future.stateField(.monotonic)) != @backingInt(future_mod.FutureState.unresolved)) return false;
     switch (th.targetKind()) {
         .closure => {
             // Racy union read (see `Thunk.targetLeadingRacy`): a concurrent
@@ -618,7 +618,7 @@ pub fn sweepMemberAdmissible(self: *VM, thunk_id: ObjectId) bool {
             const cv = th.targetLeadingRacy(Value);
             if (cv.isBuiltinClosure()) {
                 const bc = self.heap.getBuiltinClosure(cv.asObjectId()) catch return false;
-                if (@as(BuiltinId, @enumFromInt(bc.builtin_id)) == .derivationLazyAttr) return false;
+                if (@as(BuiltinId, @fromBackingInt(@intCast(bc.builtin_id))) == .derivationLazyAttr) return false;
             }
             return true;
         },
@@ -698,11 +698,11 @@ fn forceClaimedThunk(self: *VM, thunk: *Thunk, thunk_id: types.ObjectId, real_de
             prof_census.recordCoverage(
                 thunk.specDispValue(),
                 thunk.created_tsc,
-                @intFromEnum(thunk.targetKind()),
+                @backingInt(thunk.targetKind()),
             );
             age_t = prof.ageForceBegin(
                 thunk.created_tsc,
-                @intFromEnum(thunk.targetKind()),
+                @backingInt(thunk.targetKind()),
                 pathKey(self, &thunk.payload.target, thunk.targetKind()),
             );
         }

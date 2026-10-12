@@ -46,7 +46,7 @@ pub fn Methods(comptime Explorer: type) type {
         }
 
         pub fn expandFocusedPath(self: *Explorer, chunk_id: ChunkId) !void {
-            self.tree.categories[@intFromEnum(Category.bytecode)] = true;
+            self.tree.categories[@backingInt(Category.bytecode)] = true;
             try projectFocusedPath(self, chunk_id);
         }
 
@@ -85,7 +85,7 @@ pub fn Methods(comptime Explorer: type) type {
                 }
             }
             try self.tree.rows.append(self.allocator, .{ .category = .{ .kind = .heap, .depth = 0 } });
-            const heap_open = self.tree.categories[@intFromEnum(Category.heap)];
+            const heap_open = self.tree.categories[@backingInt(Category.heap)];
             const heap_projection = self.tree.projected_heap;
             if (heap_open or heap_projection != null) {
                 for (std.meta.tags(HeapView)) |view| {
@@ -101,9 +101,9 @@ pub fn Methods(comptime Explorer: type) type {
                         false;
                     if (!heap_open and !projected_view) continue;
                     try self.tree.rows.append(self.allocator, .{ .heap = .{ .view = view, .depth = 1 } });
-                    const expanded = self.tree.heap_views[@intFromEnum(view)] or projected_view;
+                    const expanded = self.tree.heap_views[@backingInt(view)] or projected_view;
                     if (!expanded) continue;
-                    const projected_only = !heap_open or !self.tree.heap_views[@intFromEnum(view)];
+                    const projected_only = !heap_open or !self.tree.heap_views[@backingInt(view)];
                     if (view == .intern or view == .builtin) {
                         try appendDenseStoreRange(self, view, 0, Explorer.Ops.view_state.storeCount(self, view), 2, projected_only);
                     } else {
@@ -121,7 +121,7 @@ pub fn Methods(comptime Explorer: type) type {
             if (filterActive(self)) {
                 try computeFilterKeep(self);
                 try appendFilteredNameRows(self, vm_tree.root_node_id, 1);
-            } else if (self.tree.categories[@intFromEnum(Category.bytecode)]) {
+            } else if (self.tree.categories[@backingInt(Category.bytecode)]) {
                 try appendNameRows(self, vm_tree.root_node_id, 1, focused_chunk);
             } else if (Explorer.Ops.view_state.currentChunk(self) != null) {
                 try appendFocusedNameRows(self, vm_tree.root_node_id, 1, focused_chunk);
@@ -498,7 +498,7 @@ pub fn Methods(comptime Explorer: type) type {
             if (self.navigation.tree_selection >= self.tree.rows.items.len) return;
             switch (self.tree.rows.items[self.navigation.tree_selection]) {
                 .category => |entry| {
-                    const index = @intFromEnum(entry.kind);
+                    const index = @backingInt(entry.kind);
                     self.tree.categories[index] = !self.tree.categories[index];
                     try rebuildTreeForCurrent(self);
                     for (self.tree.rows.items, 0..) |row, i| switch (row) {
@@ -536,12 +536,12 @@ pub fn Methods(comptime Explorer: type) type {
                         try Explorer.Ops.controller.openMode(self, .{ .heap = entry.view }, .replace);
                         return;
                     }
-                    const opening = !self.tree.heap_views[@intFromEnum(entry.view)];
+                    const opening = !self.tree.heap_views[@backingInt(entry.view)];
                     if (opening and entry.view == .objects and self.heap_index.objects == null) {
                         self.heap_index.objects = self.ev.heapObjectSnapshot(self.allocator) catch null;
                         if (self.heap_index.objects == null) self.status_msg = "(object index failed)";
                     }
-                    self.tree.heap_views[@intFromEnum(entry.view)] = opening;
+                    self.tree.heap_views[@backingInt(entry.view)] = opening;
                     try rebuildTreeForCurrent(self);
                     for (self.tree.rows.items, 0..) |row, i| switch (row) {
                         .heap => |candidate| if (candidate.view == entry.view) {
@@ -575,7 +575,7 @@ pub fn Methods(comptime Explorer: type) type {
             const selected = self.tree.rows.items[self.navigation.tree_selection];
             const collapsed = switch (selected) {
                 .category => |entry| blk: {
-                    const index = @intFromEnum(entry.kind);
+                    const index = @backingInt(entry.kind);
                     if (!self.tree.categories[index]) break :blk false;
                     self.tree.categories[index] = false;
                     break :blk true;
@@ -583,9 +583,9 @@ pub fn Methods(comptime Explorer: type) type {
                 .name => |entry| self.tree.expanded_names.remove(entry.key),
                 .range => |entry| self.tree.expanded_ranges.remove(entry.key()),
                 .heap => |entry| blk: {
-                    if (entry.view == .overview or !self.tree.heap_views[@intFromEnum(entry.view)])
+                    if (entry.view == .overview or !self.tree.heap_views[@backingInt(entry.view)])
                         break :blk false;
-                    self.tree.heap_views[@intFromEnum(entry.view)] = false;
+                    self.tree.heap_views[@backingInt(entry.view)] = false;
                     break :blk true;
                 },
                 else => false,
@@ -655,10 +655,10 @@ pub fn Methods(comptime Explorer: type) type {
             const row = self.tree.rows.items[self.navigation.tree_selection];
             if (Explorer.Ops.tree_render.treeRowDepth(row) > 0) return true;
             return switch (row) {
-                .category => |entry| self.tree.categories[@intFromEnum(entry.kind)],
+                .category => |entry| self.tree.categories[@backingInt(entry.kind)],
                 .name => |entry| self.tree.expanded_names.contains(entry.key),
                 .range => |entry| self.tree.expanded_ranges.contains(entry.key()),
-                .heap => |entry| entry.view != .overview and self.tree.heap_views[@intFromEnum(entry.view)],
+                .heap => |entry| entry.view != .overview and self.tree.heap_views[@backingInt(entry.view)],
                 else => false,
             };
         }

@@ -44,7 +44,7 @@ pub fn isSpeculatableClosureChunk(self: *VM, closure: Value) bool {
 
 pub fn isSpeculatableBuiltinClosure(self: *VM, closure: Value) bool {
     const bc = self.heap.getBuiltinClosure(closure.asObjectId()) catch return false;
-    return switch (@as(BuiltinId, @enumFromInt(bc.builtin_id))) {
+    return switch (@as(BuiltinId, @fromBackingInt(@intCast(bc.builtin_id)))) {
         // Map-style fan-out: args[0] is the user function in each.
         // Speculate when it's either a user closure with a substantial
         // body (the chunk-size threshold filters trivial cases like
@@ -66,7 +66,7 @@ pub fn isSpeculatableBuiltinClosure(self: *VM, closure: Value) bool {
 
 pub inline fn isSpeculatableMapFunc(self: *VM, func: Value) bool {
     if (func.isNixClosure()) return isSpeculatableClosureChunk(self, func);
-    if (func.isBuiltin()) return isExpensiveBuiltin(@enumFromInt(func.asBuiltinId()));
+    if (func.isBuiltin()) return isExpensiveBuiltin(@fromBackingInt(@intCast(func.asBuiltinId())));
     return false;
 }
 

@@ -97,7 +97,7 @@ const Reader = struct {
         if (self.cursor >= self.data.len) return null;
         const kind_byte = self.readU8();
         if (kind_byte > 4) return error.UnknownEventKind;
-        const kind: EventKind = @enumFromInt(kind_byte);
+        const kind: EventKind = @fromBackingInt(@intCast(kind_byte));
         switch (kind) {
             .op => {
                 const seq = try self.readU64();
@@ -319,7 +319,7 @@ fn writeRing(writer: *std.Io.Writer, ring: []const Event, prefix: []const u8) !v
 
 fn opcodeName(byte: u8) []const u8 {
     if (byte >= bytecode.opcode.count) return "?";
-    const op: OpCode = @enumFromInt(byte);
+    const op: OpCode = @fromBackingInt(@intCast(byte));
     return @tagName(op);
 }
 

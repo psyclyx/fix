@@ -140,7 +140,7 @@ pub fn Methods(comptime Explorer: type) type {
                 .attrs => c.attrs,
                 .attr_positions => c.attr_positions,
                 .intern => self.ev.internTable().stats().entries,
-                .builtin => @intCast(@typeInfo(runtime.builtins.BuiltinId).@"enum".fields.len),
+                .builtin => @intCast(@typeInfo(runtime.builtins.BuiltinId).@"enum".field_names.len),
             };
         }
 

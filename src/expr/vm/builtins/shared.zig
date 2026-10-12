@@ -53,7 +53,7 @@ pub fn makeBuiltinClosure(self: *VM, builtin_id: u16, args: []const Value) !Valu
 }
 
 pub fn makeBuiltinThunk(self: *VM, id: BuiltinId, args: []const Value) !Value {
-    return vm_force.makeThunk(self, try makeBuiltinClosure(self, @intFromEnum(id), args));
+    return vm_force.makeThunk(self, try makeBuiltinClosure(self, @backingInt(id), args));
 }
 
 /// Cross-category helper: linear index of a group whose `.name` matches

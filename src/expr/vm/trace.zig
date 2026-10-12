@@ -3,6 +3,7 @@
 const std = @import("std");
 const vm_mod = @import("context.zig");
 const Value = @import("runtime").value.Value;
+const InternId = @import("runtime").types.InternId;
 
 const VM = vm_mod.VM;
 
@@ -67,6 +68,23 @@ pub fn notCallableError(self: *VM, got: Value) error{NotCallable} {
         trace.setMessageIfAbsent(message) catch {};
     }
     return error.NotCallable;
+}
+
+pub fn unexpectedArgument(self: *VM, name: InternId) error{UnexpectedAttribute} {
+    argumentError(self, "called with unexpected argument", name);
+    return error.UnexpectedAttribute;
+}
+
+pub fn missingArgument(self: *VM, name: InternId) error{MissingAttribute} {
+    argumentError(self, "called without required argument", name);
+    return error.MissingAttribute;
+}
+
+fn argumentError(self: *VM, comptime problem: []const u8, name: InternId) void {
+    const trace = self.trace orelse return;
+    const message = std.fmt.allocPrint(self.allocator, "function " ++ problem ++ " '{s}'", .{self.intern.get(name)}) catch return;
+    defer self.allocator.free(message);
+    trace.setMessageIfAbsent(message) catch {};
 }
 
 pub fn valueTypeName(self: *VM, value: Value) []const u8 {

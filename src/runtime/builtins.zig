@@ -186,8 +186,8 @@ pub fn displayName(id: BuiltinId) []const u8 {
 
 const public_builtin_count: usize = count: {
     var count: usize = 0;
-    for (std.meta.fields(BuiltinId)) |field| {
-        const id: BuiltinId = @enumFromInt(field.value);
+    for (@typeInfo(BuiltinId).@"enum".field_values) |field_value| {
+        const id: BuiltinId = @fromBackingInt(@intCast(field_value));
         if (publicName(id) != null) count += 1;
     }
     break :count count;
@@ -206,8 +206,8 @@ const constant_bindings = [_][]const u8{
 };
 
 pub fn idForName(name: []const u8) ?BuiltinId {
-    inline for (std.meta.fields(BuiltinId)) |field| {
-        const id: BuiltinId = @enumFromInt(field.value);
+    inline for (@typeInfo(BuiltinId).@"enum".field_values) |field_value| {
+        const id: BuiltinId = @fromBackingInt(@intCast(field_value));
         if (publicName(id)) |candidate| {
             if (std.mem.eql(u8, candidate, name)) return id;
         }
@@ -216,8 +216,8 @@ pub fn idForName(name: []const u8) ?BuiltinId {
 }
 
 test "public builtin names round-trip from the canonical id" {
-    inline for (std.meta.fields(BuiltinId)) |field| {
-        const id: BuiltinId = @enumFromInt(field.value);
+    inline for (@typeInfo(BuiltinId).@"enum".field_values) |field_value| {
+        const id: BuiltinId = @fromBackingInt(@intCast(field_value));
         if (publicName(id)) |builtin_name| {
             try std.testing.expectEqual(id, idForName(builtin_name).?);
         }
@@ -427,8 +427,8 @@ pub fn buildAttrSet(intern: *InternTable, heap: *ObjectHeap, nix_path: []const N
     defer entries.deinit(heap.allocator);
     try entries.ensureTotalCapacity(heap.allocator, public_builtin_count + constant_bindings.len + 1);
 
-    inline for (std.meta.fields(BuiltinId)) |field| {
-        const id: BuiltinId = @enumFromInt(field.value);
+    inline for (@typeInfo(BuiltinId).@"enum".field_values) |field_value| {
+        const id: BuiltinId = @fromBackingInt(@intCast(field_value));
         if (publicName(id)) |builtin_name| {
             entries.appendAssumeCapacity(try builtinEntry(intern, builtin_name, id));
         }
@@ -480,14 +480,14 @@ pub fn buildAttrSet(intern: *InternTable, heap: *ObjectHeap, nix_path: []const N
 /// A thunk that resolves through the `pure_guarded` builtin, so forcing it runs
 /// the pure-eval check against the forcing VM's policy (see `BuiltinId`).
 fn pureGuardedThunk(heap: *ObjectHeap, value: Value) !Value {
-    const closure = Value.builtinClosure(try heap.addBuiltinClosure(@intFromEnum(BuiltinId.pure_guarded), &.{value}));
+    const closure = Value.builtinClosure(try heap.addBuiltinClosure(@backingInt(BuiltinId.pure_guarded), &.{value}));
     return Value.thunk(try heap.addThunk(Thunk.init(closure)));
 }
 
 fn builtinEntry(intern: *InternTable, builtin_name: []const u8, id: BuiltinId) !AttrEntry {
     return .{
         .name = try intern.intern(builtin_name),
-        .value = Value.builtin(@intFromEnum(id)),
+        .value = Value.builtin(@backingInt(id)),
     };
 }
 

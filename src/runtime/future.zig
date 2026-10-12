@@ -16,7 +16,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const sync = @import("base").sync;
 
-pub const protocol_checks = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
+pub const protocol_checks = builtin.mode == .debug or builtin.mode == .safe;
 
 /// `state` is a u32 so it's the right shape for futex-style ops if we
 /// ever need them. The low byte encodes the lifecycle (`FutureState`);
@@ -131,7 +131,7 @@ pub const Future = struct {
     waiters: std.atomic.Value(usize),
     pub fn init() Future {
         return .{
-            .state = .init(@intFromEnum(FutureState.unresolved)),
+            .state = .init(@backingInt(FutureState.unresolved)),
             .claimer = .init(invalid_claimer),
             .waiters = .init(0),
         };
@@ -141,7 +141,7 @@ pub const Future = struct {
     /// result slot before making the future reachable.
     pub fn initResolved() Future {
         return .{
-            .state = .init(@intFromEnum(FutureState.resolved)),
+            .state = .init(@backingInt(FutureState.resolved)),
             .claimer = .init(invalid_claimer),
             .waiters = .init(0),
         };
@@ -152,7 +152,7 @@ pub const Future = struct {
     /// sees BUSY and parks instead of CAS-claiming a placeholder.
     pub fn initClaimed(claimer: ClaimerId) Future {
         return .{
-            .state = .init(@intFromEnum(FutureState.evaluating)),
+            .state = .init(@backingInt(FutureState.evaluating)),
             .claimer = .init(claimer),
             .waiters = .init(0),
         };
@@ -165,14 +165,14 @@ pub const Future = struct {
     /// state left `.evaluating` (resolved / errored / reset); the caller
     /// should re-`tryClaim` to observe the terminal state.
     pub inline fn isEvaluating(self: *const Future) bool {
-        return stateFieldRaw(self.state.load(.acquire)) == @intFromEnum(FutureState.evaluating);
+        return stateFieldRaw(self.state.load(.acquire)) == @backingInt(FutureState.evaluating);
     }
 
     /// Masked read of the FSM field (flags stripped). Use for every
     /// comparison against FutureState values; comparing the raw word
     /// breaks silently once any flag bit is set.
     pub inline fn stateField(self: *const Future, comptime order: std.builtin.AtomicOrder) FutureState {
-        return @enumFromInt(stateFieldRaw(self.state.load(order)));
+        return @fromBackingInt(@intCast(stateFieldRaw(self.state.load(order))));
     }
 
     /// Flag-preserving FSM transition: CAS keeps the high flag bits intact
@@ -181,7 +181,7 @@ pub const Future = struct {
     inline fn transition(self: *Future, new_state: FutureState, comptime order: std.builtin.AtomicOrder) void {
         var cur = self.state.load(.monotonic);
         while (true) {
-            const next = (cur & ~state_field_mask) | @intFromEnum(new_state);
+            const next = (cur & ~state_field_mask) | @backingInt(new_state);
             cur = self.state.cmpxchgWeak(cur, next, order, .monotonic) orelse return;
         }
     }
@@ -190,7 +190,7 @@ pub const Future = struct {
     /// `tryClaimSolo` for the single-thread contract).
     inline fn transitionSolo(self: *Future, new_state: FutureState) void {
         const cur = self.state.load(.monotonic);
-        self.state.store((cur & ~state_field_mask) | @intFromEnum(new_state), .monotonic);
+        self.state.store((cur & ~state_field_mask) | @backingInt(new_state), .monotonic);
     }
 
     /// Try to claim this future for evaluation by `claimer`. Returns a
@@ -214,7 +214,7 @@ pub const Future = struct {
                 if (raw == poisoned_state)
                     @panic("Future.tryClaim on a GC-swept object — stale reference held across a collection (missing root)");
             }
-            const s: FutureState = @enumFromInt(stateFieldRaw(raw));
+            const s: FutureState = @fromBackingInt(@intCast(stateFieldRaw(raw)));
             switch (s) {
                 .resolved => return .already_resolved,
                 .blackhole => return .blackhole,
@@ -224,7 +224,7 @@ pub const Future = struct {
                     // so a racing markDemanded just retries the loop.
                     const prev = self.state.cmpxchgWeak(
                         raw,
-                        (raw & ~state_field_mask) | @intFromEnum(FutureState.evaluating),
+                        (raw & ~state_field_mask) | @backingInt(FutureState.evaluating),
                         .acquire,
                         .monotonic,
                     );
@@ -264,12 +264,12 @@ pub const Future = struct {
             if (raw == poisoned_state)
                 @panic("Future.tryClaimSolo on a GC-swept object — stale reference held across a collection (missing root)");
         }
-        switch (@as(FutureState, @enumFromInt(stateFieldRaw(raw)))) {
+        switch (@as(FutureState, @fromBackingInt(@intCast(stateFieldRaw(raw))))) {
             .resolved => return .already_resolved,
             .blackhole => return .blackhole,
             .errored => return .errored,
             .unresolved => {
-                self.state.store((raw & ~state_field_mask) | @intFromEnum(FutureState.evaluating), .monotonic);
+                self.state.store((raw & ~state_field_mask) | @backingInt(FutureState.evaluating), .monotonic);
                 self.claimer.store(claimer, .monotonic);
                 return .claimed;
             },
@@ -326,7 +326,7 @@ pub const Future = struct {
         // totally ordered, so either the resolver sees our lock bit (and
         // waits for the push) or we see its published state here (seq_cst
         // pairs with the resolver's barrier; see wakeFiberWaiters).
-        const s: FutureState = @enumFromInt(stateFieldRaw(self.state.load(.seq_cst)));
+        const s: FutureState = @fromBackingInt(@intCast(stateFieldRaw(self.state.load(.seq_cst))));
         if (s != .evaluating) {
             self.waiters.store(head, .release); // unlock, list unchanged
             return false;

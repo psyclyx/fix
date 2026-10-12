@@ -64,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
     // and first-touch faults.
     var big_blocks = process_support.LargeBlockAllocator.init(init.gpa);
     defer big_blocks.deinit();
-    const allocator = if (comptime builtin.mode == .Debug) debug_gpa.allocator() else big_blocks.allocator();
+    const allocator = if (comptime builtin.mode == .debug) debug_gpa.allocator() else big_blocks.allocator();
     const process: cli.ProcessContext = .{
         .allocator = allocator,
         .eval_release = .{ .context = &big_blocks, .run = trimLargeBlocks },

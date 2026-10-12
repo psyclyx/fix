@@ -349,7 +349,7 @@ const Builder = struct {
 
 fn stableNodeKey(parent: u64, label: []const u8, kind: Kind, synthetic: bool) u64 {
     var hash = std.hash.Wyhash.init(parent ^ 0x6e_61_6d_65_74_72_65_65);
-    const discriminants = [_]u8{ @intFromEnum(kind), @intFromBool(synthetic) };
+    const discriminants = [_]u8{ @backingInt(kind), @intFromBool(synthetic) };
     hash.update(&discriminants);
     hash.update(label);
     return hash.final();

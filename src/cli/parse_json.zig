@@ -84,11 +84,33 @@ const CompatibilityWriter = struct {
         try self.writer.writeByte('\n');
     }
 
+    /// Backs the scratch arenas with `gpa` but refuses in-place resize, so an
+    /// arena grows by new blocks only and its allocation count does not depend
+    /// on where `gpa` placed earlier blocks.
+    fn scratchBacking(self: *CompatibilityWriter) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = scratchAlloc,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = scratchFree,
+        } };
+    }
+
+    fn scratchAlloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *CompatibilityWriter = @ptrCast(@alignCast(ctx));
+        return self.gpa.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn scratchFree(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *CompatibilityWriter = @ptrCast(@alignCast(ctx));
+        self.gpa.rawFree(memory, alignment, ret_addr);
+    }
+
     fn scratchAt(self: *CompatibilityWriter, depth: usize) !std.mem.Allocator {
         while (self.scratch.items.len <= depth) {
             const arena = try self.gpa.create(std.heap.ArenaAllocator);
             errdefer self.gpa.destroy(arena);
-            arena.* = std.heap.ArenaAllocator.init(self.gpa);
+            arena.* = std.heap.ArenaAllocator.init(self.scratchBacking());
             errdefer arena.deinit();
             try self.scratch.append(self.gpa, arena);
         }

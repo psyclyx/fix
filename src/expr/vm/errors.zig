@@ -229,6 +229,7 @@ pub fn defaultErrorMessage(err: anyerror) []const u8 {
         error.UndefinedVariable => "undefined variable",
         error.DivisionByZero => "division by zero",
         error.AssertionFailed => "assertion failed",
+        error.RecursiveThunk => "infinite recursion encountered",
         error.ImportCycle => "import cycle detected",
         error.FileNotFound => "No such file or directory",
         error.UnsupportedPathType => "file has an unsupported type",

@@ -381,7 +381,7 @@ test "checksum-valid malformed operand layouts publish no cache state" {
         const bytes = try allocator.dupe(u8, clean);
         defer allocator.free(bytes);
         const code = try firstChunkCode(bytes);
-        code[code.len - 1] = @intFromEnum(malformed_op);
+        code[code.len - 1] = @backingInt(malformed_op);
         refreshChecksum(bytes);
         var ast_arena = ast.AstArena.init(allocator);
         defer ast_arena.deinit();

@@ -17,7 +17,7 @@ const char_ident_continue: u8 = 4; // ident-start, digit, '-', '\'', '_'
 const char_path_continue: u8 = 8; // ident, digit, '/', '.', '-', '_', '+'
 
 const class_table = blk: {
-    var tbl = [_]u8{0} ** 256;
+    var tbl: [256]u8 = @splat(0);
     for (0..256) |ci| {
         const c: u8 = @intCast(ci);
         const alpha = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
@@ -41,7 +41,7 @@ inline fn hasClass(c: u8, mask: u8) bool {
 // falls back to the scalar loops everywhere.
 const vec_len: comptime_int = std.simd.suggestVectorLength(u8) orelse 0;
 const Vec = @Vector(vec_len, u8);
-const VMask = std.meta.Int(.unsigned, if (vec_len == 0) 1 else vec_len);
+const VMask = @Int(.unsigned, if (vec_len == 0) 1 else vec_len);
 
 inline fn maskEq(v: Vec, comptime c: u8) VMask {
     return @bitCast(v == @as(Vec, @splat(c)));

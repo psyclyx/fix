@@ -119,16 +119,16 @@ pub fn Methods(comptime Explorer: type) type {
                 },
                 .object => |id| {
                     self.tree.projected_heap = .{ .view = .objects, .id = id };
-                    self.tree.categories[@intFromEnum(Category.heap)] = true;
+                    self.tree.categories[@backingInt(Category.heap)] = true;
                     try Explorer.Ops.tree_projection.rebuildTreeForCurrent(self);
                 },
                 .store_record => |record| {
                     self.tree.projected_heap = .{ .view = record.view, .id = record.id };
-                    self.tree.categories[@intFromEnum(Category.heap)] = true;
+                    self.tree.categories[@backingInt(Category.heap)] = true;
                     try Explorer.Ops.tree_projection.rebuildTreeForCurrent(self);
                 },
                 .heap => {
-                    self.tree.categories[@intFromEnum(Category.heap)] = true;
+                    self.tree.categories[@backingInt(Category.heap)] = true;
                     try Explorer.Ops.tree_projection.rebuildTreeForCurrent(self);
                 },
                 .debug_frame, .debug_value => try Explorer.Ops.tree_projection.rebuildTreeForCurrent(self),

@@ -33,6 +33,19 @@ pub fn buildAttrs(self: *VM, count: u16) !void {
     try stack.push(self, Value.attrs(id));
 }
 
+/// One dynamic-key pair whose entry keeps `pos`. A null key gives `{ }`.
+pub fn buildDynamicAttr(self: *VM, pos: heap_mod.SourcePos) !void {
+    const start = self.sp - 2;
+    const key = self.stack[start];
+    if (key.isHeapString()) self.stack[start] = Value.string(try vm_strings.stringNameId(self, key));
+    var position = [_]heap_mod.AttrPosEntry{.{ .name = undefined, .pos = pos }};
+    const keyed = self.stack[start].kind() == .string;
+    if (keyed) position[0].name = self.stack[start].asInternId();
+    const id = try self.heap.addAttrsFromStackPairsSorted(self.stack[start..self.sp], if (keyed) &position else &.{});
+    self.sp = start;
+    try stack.push(self, Value.attrs(id));
+}
+
 /// `attrs_new_named*`: entries are compile-time sorted by interned name and
 /// duplicate-free — skip the construction sort. Names come from the chunk
 /// side table, values are the top `count` stack slots.

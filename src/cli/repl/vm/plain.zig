@@ -150,7 +150,7 @@ pub const Context = struct {
                 counts.attrs,
                 counts.attr_positions,
                 self.ev.internTable().stats().entries,
-                @typeInfo(runtime.builtins.BuiltinId).@"enum".fields.len,
+                @typeInfo(runtime.builtins.BuiltinId).@"enum".field_names.len,
             },
         );
         try self.writer.writeAll("  object variants\n");
@@ -730,7 +730,7 @@ pub const Context = struct {
             .attrs => counts.attrs,
             .attr_positions => counts.attr_positions,
             .intern => self.ev.internTable().stats().entries,
-            .builtin => @intCast(@typeInfo(runtime.builtins.BuiltinId).@"enum".fields.len),
+            .builtin => @intCast(@typeInfo(runtime.builtins.BuiltinId).@"enum".field_names.len),
         };
     }
 

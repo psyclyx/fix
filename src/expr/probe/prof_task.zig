@@ -40,7 +40,7 @@ pub const TaskClass = enum(u8) {
     /// urgent lane).
     readdir_prefetch,
 };
-pub const task_class_count = @typeInfo(TaskClass).@"enum".fields.len;
+pub const task_class_count = @typeInfo(TaskClass).@"enum".field_names.len;
 pub const task_cycle_buckets = 26; // bucket i = task cycles in [2^i, 2^(i+1))
 
 const AtomicU64 = std.atomic.Value(u64);
@@ -64,7 +64,7 @@ pub var tc_hist: [task_class_count][task_cycle_buckets]AtomicU64 = @splat(@splat
 
 pub fn taskCensusRecord(class: TaskClass, live_items: u64, total_items: u64, arrived_busy: bool, cycles: u64) void {
     if (!enabled) return;
-    const ci = @intFromEnum(class);
+    const ci = @backingInt(class);
     _ = tc_n[ci].fetchAdd(1, .monotonic);
     _ = tc_items[ci].fetchAdd(total_items, .monotonic);
     _ = tc_items_live[ci].fetchAdd(live_items, .monotonic);
@@ -99,7 +99,7 @@ pub fn report() void {
             std.debug.print(
                 "  {s}: n={d} noop={d} ({d:.1}%) busy_arrival={d} items={d} live_items={d} ({d:.1}%) useful_cy={d} (avg={d}) noop_cy={d} (avg={d})\n",
                 .{
-                    @tagName(@as(TaskClass, @enumFromInt(ci))),
+                    @tagName(@as(TaskClass, @fromBackingInt(@intCast(ci)))),
                     n,
                     noop,
                     pct(noop, n),

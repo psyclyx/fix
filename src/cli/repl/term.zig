@@ -153,8 +153,8 @@ fn rawTermios(orig: posix.termios) posix.termios {
     raw.iflag.BRKINT = false;
     raw.iflag.INPCK = false;
     raw.iflag.ISTRIP = false;
-    raw.cc[@intFromEnum(posix.V.MIN)] = 1;
-    raw.cc[@intFromEnum(posix.V.TIME)] = 0;
+    raw.cc[@backingInt(posix.V.MIN)] = 1;
+    raw.cc[@backingInt(posix.V.TIME)] = 0;
     return raw;
 }
 

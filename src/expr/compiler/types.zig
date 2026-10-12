@@ -40,6 +40,7 @@ pub const AttrEntryView = struct {
     /// entries in the same normalized view lets attr-set lowering use one
     /// mixed/static/recursive pipeline instead of mirroring the AST path.
     dynamic_name: ?*const Node = null,
+    dynamic_offset: u32 = 0,
     expr: *const Node,
     inherit_outer: bool = false,
     inherit_group: u32 = 0,

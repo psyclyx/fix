@@ -127,7 +127,7 @@ pub fn report(
     const retained_blocks = block_cache.retained_bytes.load(.monotonic);
     p("  -- mapping residency (mincore; current RSS {d:.1} MB + hugetlb {d:.1} MB) --\n", .{ mb(cur_rss), mb(base_hugetlb.mappedBytes()) });
     inline for (0..vma_mod.tag_count) |ti| {
-        const tag: vma_mod.Tag = @enumFromInt(ti);
+        const tag: vma_mod.Tag = @fromBackingInt(@intCast(ti));
         p("  {s:<16}{d:>8.1} MB  ({d} regions, {d:.0} MB reserved)\n", .{
             mem_tag.tagName(tag), mb(res.rss_bytes[ti]), res.regions[ti], mb(res.reserved_bytes[ti]),
         });

@@ -223,11 +223,11 @@ pub const WorkerFiber = struct {
     }
 
     pub fn lifecycle(self: *const WorkerFiber) FiberState {
-        return @enumFromInt(self.state.load(.acquire));
+        return @fromBackingInt(@intCast(self.state.load(.acquire)));
     }
 
     fn setLifecycle(self: *WorkerFiber, state: FiberState) void {
-        self.state.store(@intFromEnum(state), .release);
+        self.state.store(@backingInt(state), .release);
     }
 
     /// The one stack-switching suspension seam for worker fibers. Keeping the
@@ -916,7 +916,7 @@ pub const Worker = struct {
             // demand-role fields start (and recycle back to) cleared.
             .ctx = .{ .claimer_id = future_mod.makeClaimer(fiber_id) },
             .scratch = arena_mod.ArenaAllocator.init(self.allocator),
-            .state = .init(@intFromEnum(FiberState.free)),
+            .state = .init(@backingInt(FiberState.free)),
             .in_runfiber = .init(0),
             .run_mu = .{},
             .current_task = null,
@@ -1116,7 +1116,7 @@ fn censusScanTask(f: *WorkerFiber, task: Task, live: *u64, total: *u64, busy: *b
 /// fault.
 fn specRootBandSmall(f: *WorkerFiber, thunk_id: types.ObjectId) bool {
     const th = f.vm.heap.getThunkAssumeValid(thunk_id);
-    if (@intFromEnum(th.future.stateField(.monotonic)) != @intFromEnum(future_mod.FutureState.unresolved)) return false;
+    if (@backingInt(th.future.stateField(.monotonic)) != @backingInt(future_mod.FutureState.unresolved)) return false;
     if (th.targetKind() != .bytecode) return false;
     // Racy union read (see `Thunk.targetLeadingRacy`): a peer may resolve the
     // thunk between the state load above and here, flipping the payload to

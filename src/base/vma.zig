@@ -46,7 +46,7 @@ pub fn Vma(
         /// consumers (e.g. the block cache) that reset blocks to it.
         pub const default_tag: TagT = default_tag_param;
 
-        pub const tag_count = @typeInfo(Tag).@"enum".fields.len;
+        pub const tag_count = @typeInfo(Tag).@"enum".field_names.len;
 
         /// Attribution hint for large allocations made *right now* on this
         /// thread: the block cache stamps every block it registers or hands
@@ -179,7 +179,7 @@ pub fn Vma(
             mu.unlock();
             for (&snapshot) |s| {
                 if (s.addr <= tombstone) continue;
-                const t = @intFromEnum(s.tag);
+                const t = @backingInt(s.tag);
                 r.regions[t] += 1;
                 r.reserved_bytes[t] += s.len;
                 r.rss_bytes[t] += residentBytes(s.addr, s.len);
@@ -274,7 +274,7 @@ test "register / residency / retag / unregister round-trip" {
     mem[0] = 1;
     mem[std.heap.pageSize()] = 1;
     var r = TestVma.residency();
-    const fs = @intFromEnum(TestVma.Tag.b);
+    const fs = @backingInt(TestVma.Tag.b);
     try std.testing.expect(r.regions[fs] == before.regions[fs] + 1);
     try std.testing.expect(r.rss_bytes[fs] >= before.rss_bytes[fs] + 2 * std.heap.pageSize());
     try std.testing.expect(r.reserved_bytes[fs] >= before.reserved_bytes[fs] + len);
@@ -285,6 +285,6 @@ test "register / residency / retag / unregister round-trip" {
 
     TestVma.unregisterRegion(mem.ptr);
     r = TestVma.residency();
-    const bb = @intFromEnum(TestVma.Tag.a);
+    const bb = @backingInt(TestVma.Tag.a);
     try std.testing.expect(r.reserved_bytes[bb] < before.reserved_bytes[bb] + len);
 }

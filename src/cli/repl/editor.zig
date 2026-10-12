@@ -85,7 +85,7 @@ pub const Editor = struct {
     saved: std.ArrayListUnmanaged(u8) = .empty,
 
     /// Kill ring (owned entries, newest at `kill_head`).
-    kill_ring: [kill_ring_cap]?[]u8 = [_]?[]u8{null} ** kill_ring_cap,
+    kill_ring: [kill_ring_cap]?[]u8 = @splat(null),
     kill_head: usize = 0,
     /// Yank state for M-y: span of the last yank, and which ring slot it was.
     last_yank: ?struct { start: usize, len: usize, slot: usize } = null,

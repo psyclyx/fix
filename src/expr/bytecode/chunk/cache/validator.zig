@@ -168,6 +168,7 @@ pub fn validateAndPreflightCode(
                 try boundedRange(encoding.readU32(code, insn.ip + 3), encoding.readU16(code, insn.ip + 1), attr_names_count, debug);
                 try boundedRange(encoding.readU32(code, insn.ip + 9), encoding.readU16(code, insn.ip + 7), attr_pos_count, debug);
             },
+            .attrs_new_dyn_pos => try boundedRange(encoding.readU32(code, insn.ip + 1), 1, attr_pos_count, debug),
             .thunk_defer => {
                 const capture_count: u32 = encoding.readU16(code, insn.ip + 9);
                 const capture_start = encoding.readU32(code, insn.ip + 5);

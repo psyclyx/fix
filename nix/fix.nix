@@ -3,7 +3,7 @@
   stdenv,
   cpu ? "baseline",
   release ? "fast",
-  zig_0_16,
+  zig_0_17,
   mercurial,
   openssh,
   gnutar,
@@ -11,7 +11,7 @@
   makeWrapper,
 }:
 let
-  zig = zig_0_16;
+  zig = zig_0_17;
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "fix";
@@ -35,7 +35,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   zigDeps = zig.fetchDeps {
     inherit (finalAttrs) pname version src;
-    hash = "sha256-Pn++iuvuuqwRQJ+0dHQXJZx4QliNfUzh49wdhukNvgc=";
+    hash = "sha256-RsPfhrMtOH0jyaZjAr3UBRUTDZH1qmkXSUlp8O1Sjjo=";
   };
 
   postConfigure = ''

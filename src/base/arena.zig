@@ -281,9 +281,12 @@ test "reset while retaining a buffer" {
     defer arena_allocator.deinit();
     const a = arena_allocator.allocator();
 
-    // Create two internal buffers
+    // Create two internal buffers. The second allocation must be too big
+    // for the child allocator to serve by growing the first buffer: the
+    // testing allocator grows small bucket allocations in place but never
+    // moves one across its large-allocation threshold.
     _ = try a.alloc(u8, 1);
-    _ = try a.alloc(u8, 1000);
+    _ = try a.alloc(u8, 1 << 20);
 
     // Check that we have at least two buffers
     try std.testing.expect(arena_allocator.state.buffer_list.first.?.next != null);

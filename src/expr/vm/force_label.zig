@@ -30,7 +30,7 @@ const BuiltinId = @import("runtime").builtins.BuiltinId;
 /// (state-guarded). Best-effort and bounds-safe against a concurrent resolve.
 pub fn thunkLabel(self: *VM, thunk_id: ObjectId, buf: []u8) observ.Subject {
     const th = self.heap.getThunkAssumeValid(thunk_id);
-    if (@intFromEnum(th.future.stateField(.acquire)) > @intFromEnum(future_mod.FutureState.evaluating)) return .none;
+    if (@backingInt(th.future.stateField(.acquire)) > @backingInt(future_mod.FutureState.evaluating)) return .none;
     return critTargetLabel(self, th, buf, true);
 }
 
@@ -41,7 +41,7 @@ pub fn critWaitLabel(self: *VM, thunk_id: ObjectId, buf: []u8) observ.Subject {
     // because the thunk RESOLVED mid-read (the race — a short wait, target
     // clobbered) or because it's genuinely source-less; distinguish the two.
     const th = self.heap.getThunkAssumeValid(thunk_id);
-    if (@intFromEnum(th.future.stateField(.acquire)) > @intFromEnum(future_mod.FutureState.evaluating)) return observ.Subject.literal("resolved");
+    if (@backingInt(th.future.stateField(.acquire)) > @backingInt(future_mod.FutureState.evaluating)) return observ.Subject.literal("resolved");
     return observ.Subject.literal(@tagName(th.targetKind()));
 }
 
@@ -52,7 +52,7 @@ pub fn critWaitLabel(self: *VM, thunk_id: ObjectId, buf: []u8) observ.Subject {
 /// live when read (state can't go terminal → evaluating), so the ids in them
 /// are real; otherwise discard them unused.
 inline fn stillEvaluating(th: *const thunk_mod.Thunk) bool {
-    return @intFromEnum(th.future.stateField(.acquire)) <= @intFromEnum(future_mod.FutureState.evaluating);
+    return @backingInt(th.future.stateField(.acquire)) <= @backingInt(future_mod.FutureState.evaluating);
 }
 
 /// Snapshot the target arm's bytes as concrete type `T` through a RAW pointer —
@@ -144,9 +144,9 @@ fn critClosureLabel(self: *VM, cv: Value, buf: []u8) observ.Subject {
         },
         .builtin_closure => blk: {
             const bc = self.heap.getBuiltinClosure(cv.asObjectId()) catch break :blk .none;
-            break :blk critBuiltinLabel(self, @enumFromInt(bc.builtin_id), bc.args, buf);
+            break :blk critBuiltinLabel(self, @fromBackingInt(@intCast(bc.builtin_id)), bc.args, buf);
         },
-        .builtin => critBuiltinLabel(self, @enumFromInt(cv.asBuiltinId()), &.{}, buf),
+        .builtin => critBuiltinLabel(self, @fromBackingInt(@intCast(cv.asBuiltinId())), &.{}, buf),
         else => .none,
     };
 }

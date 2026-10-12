@@ -11,7 +11,7 @@ const TextRef = @import("base").TextRef;
 // of plain bytes; jump straight to the next structurally interesting byte.
 const vec_len: comptime_int = std.simd.suggestVectorLength(u8) orelse 0;
 const Vec = @Vector(vec_len, u8);
-const VMask = std.meta.Int(.unsigned, if (vec_len == 0) 1 else vec_len);
+const VMask = @Int(.unsigned, if (vec_len == 0) 1 else vec_len);
 
 inline fn maskEq(v: Vec, comptime c: u8) VMask {
     return @bitCast(v == @as(Vec, @splat(c)));

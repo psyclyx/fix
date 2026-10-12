@@ -325,11 +325,11 @@ test "map/unmap: accounting balances whether or not the pool serves it" {
                 const inherited = linux.errno(linux.mincore(p, std.heap.page_size_min, &state)) == .SUCCESS;
                 linux.exit_group(if (inherited) 1 else 0);
             }
-            var status: u32 = 0;
+            var status: i32 = 0;
             const waited = linux.waitpid(@intCast(fork_rc), &status, 0);
             try std.testing.expectEqual(linux.E.SUCCESS, linux.errno(waited));
-            try std.testing.expect(linux.W.IFEXITED(status));
-            try std.testing.expectEqual(@as(u8, 0), linux.W.EXITSTATUS(status));
+            try std.testing.expect(linux.W.IFEXITED(@bitCast(status)));
+            try std.testing.expectEqual(@as(u8, 0), linux.W.EXITSTATUS(@bitCast(status)));
         }
 
         p[0] = 0xAB;

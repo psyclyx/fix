@@ -145,7 +145,7 @@ fn maybeSiblingSweep(self: *VM, obj_id: types.ObjectId, member: Value) void {
     if (self.speculation.active) return;
     if (!member.isThunk()) return;
     const th = self.heap.getThunkAssumeValid(member.asObjectId());
-    if (@intFromEnum(th.future.stateField(.monotonic)) != @intFromEnum(future_mod.FutureState.unresolved)) return;
+    if (@backingInt(th.future.stateField(.monotonic)) != @backingInt(future_mod.FutureState.unresolved)) return;
     const workers = self.workers;
     if (!self.heap.trySiblingSweep(obj_id, workers.siblingMin(), workers.siblingMax())) return;
     const ok = workers.submitSiblingSweep(obj_id, workers.siblingUrgent(), self.workerId());
@@ -252,13 +252,13 @@ pub fn getAttrPathMixedOrValue(self: *VM, attrs_val: Value, dynamic_names: []con
         const tag = encoded_segments[offset];
         offset += 1;
         const name_id: InternId = switch (tag) {
-            @intFromEnum(bytecode_mod.MixedAttrSegmentTag.static) => name: {
+            @backingInt(bytecode_mod.MixedAttrSegmentTag.static) => name: {
                 if (!current.isAttrs()) return force.forceValue(self, default_val);
                 const id = readU32(encoded_segments, offset);
                 offset += 4;
                 break :name id;
             },
-            @intFromEnum(bytecode_mod.MixedAttrSegmentTag.dynamic) => name: {
+            @backingInt(bytecode_mod.MixedAttrSegmentTag.dynamic) => name: {
                 const name_val = try force.forceValue(self, dynamic_names[dynamic_i]);
                 dynamic_i += 1;
                 if (!current.isAttrs()) return force.forceValue(self, default_val);
@@ -303,13 +303,13 @@ pub fn hasAttrPathMixed(self: *VM, attrs_val: Value, dynamic_names: []const Valu
         const tag = encoded_segments[offset];
         offset += 1;
         const name_id: InternId = switch (tag) {
-            @intFromEnum(bytecode_mod.MixedAttrSegmentTag.static) => name: {
+            @backingInt(bytecode_mod.MixedAttrSegmentTag.static) => name: {
                 if (!current.isAttrs()) return false;
                 const id = readU32(encoded_segments, offset);
                 offset += 4;
                 break :name id;
             },
-            @intFromEnum(bytecode_mod.MixedAttrSegmentTag.dynamic) => name: {
+            @backingInt(bytecode_mod.MixedAttrSegmentTag.dynamic) => name: {
                 const name_val = try force.forceValue(self, dynamic_names[dynamic_i]);
                 dynamic_i += 1;
                 if (!current.isAttrs()) return false;

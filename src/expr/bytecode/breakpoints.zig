@@ -29,7 +29,7 @@ const name_tree = @import("name_tree.zig");
 const ChunkId = types.ChunkId;
 const InternId = types.InternId;
 
-const breakpoint_byte: u8 = @intFromEnum(opcode.OpCode.breakpoint);
+const breakpoint_byte: u8 = @backingInt(opcode.OpCode.breakpoint);
 
 pub const BreakpointTable = struct {
     gpa: std.mem.Allocator,
@@ -364,7 +364,7 @@ pub const BreakpointTable = struct {
         const original = if (offset < chunk.code.len)
             chunk.code[offset]
         else
-            @intFromEnum(opcode.OpCode.halt);
+            @backingInt(opcode.OpCode.halt);
         for (self.placements.items) |p| {
             if (p.chunk_id == chunk_id and p.offset == offset)
                 return .{ .original = original, .pause = true, .kind = .breakpoint };
@@ -373,7 +373,7 @@ pub const BreakpointTable = struct {
             if (p.chunk_id == chunk_id and p.offset == offset)
                 return .{ .original = original, .pause = frames_len <= self.step_max_depth, .kind = self.step_hit_kind };
         }
-        return .{ .original = @intFromEnum(opcode.OpCode.halt), .pause = false, .kind = .none };
+        return .{ .original = @backingInt(opcode.OpCode.halt), .pause = false, .kind = .none };
     }
 
     /// A frame return is also a useful step boundary: the caller is live again
@@ -516,13 +516,13 @@ pub const BreakpointTable = struct {
         if (offset >= chunk.code.len) return null;
         const raw = chunk.code[offset];
         if (raw >= opcode.count) return null;
-        return @enumFromInt(raw);
+        return @fromBackingInt(@intCast(raw));
     }
 
     fn instructionEnd(chunk: *const Chunk, start: usize) ?usize {
         const raw = chunk.code[start];
         if (raw >= opcode.count) return null;
-        const op: opcode.OpCode = @enumFromInt(raw);
+        const op: opcode.OpCode = @fromBackingInt(@intCast(raw));
         const operands_start = start + 1;
         const operands_len = opcode.operandLen(op, chunk.code, operands_start);
         if (operands_len > chunk.code.len - operands_start) return null;
@@ -734,7 +734,7 @@ fn setAtWithInjectedFailures(
         try std.testing.expectEqual(@as(usize, 0), table.placements.items.len);
         try std.testing.expectEqual(@as(u32, 1), table.next_id);
         try std.testing.expectEqual(
-            @as(u8, @intFromEnum(opcode.OpCode.push_const)),
+            @as(u8, @backingInt(opcode.OpCode.push_const)),
             registry.get(chunk_id).?.code[0],
         );
         return err;
@@ -823,9 +823,9 @@ test "step sites advance suspended operand ips to instruction boundaries" {
     // loc_get has one operand and push_const has two. A handler can suspend
     // with its saved ip at any of the marked operand positions.
     var code = [_]u8{
-        @intFromEnum(opcode.OpCode.loc_get),    7,
-        @intFromEnum(opcode.OpCode.push_const), 0,
-        0,                                      @intFromEnum(opcode.OpCode.halt),
+        @backingInt(opcode.OpCode.loc_get),    7,
+        @backingInt(opcode.OpCode.push_const), 0,
+        0,                                     @backingInt(opcode.OpCode.halt),
     };
     var constants: [0]Value = .{};
     var chunk: Chunk = .{ .code = &code, .constants = &constants, .local_count = 0 };
@@ -842,7 +842,7 @@ test "step sites advance suspended operand ips to instruction boundaries" {
     try table.placeStepSite(9, 1, &chunk);
     try std.testing.expectEqual(@as(u8, 7), code[1]);
     try table.placeStepSite(9, 2, &chunk);
-    try std.testing.expectEqual(@intFromEnum(opcode.OpCode.push_const), code[2]);
+    try std.testing.expectEqual(@backingInt(opcode.OpCode.push_const), code[2]);
     try std.testing.expectEqual(breakpoint_byte, table.executableCode(9, &chunk)[2]);
     try std.testing.expectEqual(@as(?u32, 5), table.instructionBoundaryAtOrAfter(9, &chunk, 3));
     try std.testing.expectEqual(@as(?u32, 0), table.instructionForSavedIp(9, &chunk, 1));
@@ -858,12 +858,12 @@ test "evaluation step sites include forces and calls but skip stack plumbing" {
     defer table.deinit();
 
     var code = [_]u8{
-        @intFromEnum(opcode.OpCode.push_null),
-        @intFromEnum(opcode.OpCode.loc_get),
+        @backingInt(opcode.OpCode.push_null),
+        @backingInt(opcode.OpCode.loc_get),
         0,
-        @intFromEnum(opcode.OpCode.pop),
-        @intFromEnum(opcode.OpCode.call),
-        @intFromEnum(opcode.OpCode.halt),
+        @backingInt(opcode.OpCode.pop),
+        @backingInt(opcode.OpCode.call),
+        @backingInt(opcode.OpCode.halt),
     };
     var constants: [0]Value = .{};
     var chunk: Chunk = .{ .code = &code, .constants = &constants, .local_count = 1 };
@@ -910,13 +910,13 @@ test "source-span breakpoints distinguish nested expressions on one line" {
     try std.testing.expect(table.hasSite(chunk_id, 0));
     try std.testing.expect(table.hasSite(chunk_id, 3));
     try std.testing.expect(table.hasSite(chunk_id, 6));
-    try std.testing.expectEqual(@intFromEnum(opcode.OpCode.push_const), chunk.code[0]);
+    try std.testing.expectEqual(@backingInt(opcode.OpCode.push_const), chunk.code[0]);
     try std.testing.expectEqual(breakpoint_byte, table.executableCode(chunk_id, chunk)[0]);
 
     try std.testing.expect(table.removeSpan(&registry, chunk_id, outer));
     try std.testing.expect(!table.hasSpan(chunk_id, outer));
-    try std.testing.expectEqual(@as(u8, @intFromEnum(opcode.OpCode.int_add)), chunk.code[6]);
-    try std.testing.expectEqual(@as(u8, @intFromEnum(opcode.OpCode.int_add)), table.executableCode(chunk_id, chunk)[6]);
+    try std.testing.expectEqual(@as(u8, @backingInt(opcode.OpCode.int_add)), chunk.code[6]);
+    try std.testing.expectEqual(@as(u8, @backingInt(opcode.OpCode.int_add)), table.executableCode(chunk_id, chunk)[6]);
     try std.testing.expect(table.hasSpan(chunk_id, left));
     try std.testing.expect(table.hasSpan(chunk_id, right));
     try std.testing.expect(table.removeSpan(&registry, chunk_id, left));
@@ -937,7 +937,7 @@ test "breakpoint overlays preserve canonical chunk deduplication" {
         name_tree.root_name_id,
     );
     const canonical = registry.get(first.id).?;
-    const original = @intFromEnum(opcode.OpCode.push_const);
+    const original = @backingInt(opcode.OpCode.push_const);
     try std.testing.expectEqual(original, canonical.code[0]);
     try std.testing.expectEqual(@as(usize, 1), (try table.setAt(&registry, first.id, 0)).sites);
     try std.testing.expectEqual(original, canonical.code[0]);

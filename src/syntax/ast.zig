@@ -195,6 +195,9 @@ pub const Node = struct {
     pub const AttrSetEntry = struct {
         path: []Atom,
         dynamic_name: ?*Node = null,
+        /// Source offset Nix reports as the position of `dynamic_name`: the
+        /// start of the attribute path that contains it.
+        dynamic_offset: u32 = 0,
         expr: *Node,
         inherit_outer: bool = false,
         inherit_group: u32 = 0,
@@ -511,6 +514,7 @@ fn cloneAttrSetEntries(arena: *AstArena, entries: []const Node.AttrSetEntry) any
         dest.* = .{
             .path = try cloneAtoms(arena, entry.path),
             .dynamic_name = if (entry.dynamic_name) |name| try cloneNode(arena, name) else null,
+            .dynamic_offset = entry.dynamic_offset,
             .expr = try cloneNode(arena, entry.expr),
             .inherit_outer = entry.inherit_outer,
             .inherit_group = entry.inherit_group,

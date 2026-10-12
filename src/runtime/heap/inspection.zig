@@ -192,7 +192,7 @@ pub const ObjectInfo = union(enum) {
 
 pub fn thunkInfo(thunk: *const Thunk) ThunkInfo {
     const raw_state = future_mod.stateFieldRaw(thunk.future.state.load(.acquire));
-    const state: ThunkState = @enumFromInt(@min(raw_state, @intFromEnum(ThunkState.errored)));
+    const state: ThunkState = @fromBackingInt(@intCast(@min(raw_state, @backingInt(ThunkState.errored))));
     const body: @TypeOf(@as(ThunkInfo, undefined).body) = switch (state) {
         .resolved => .{ .result = valueRef(thunk.payload.result) },
         .errored => .{ .error_name = @errorName(thunk.cachedFailure().err()) },
@@ -265,11 +265,11 @@ pub fn stats(heap: anytype) Stats {
         .attrs = heap.attrs.count(),
         .attr_positions = heap.attr_positions.count(),
         .bytes = heap.bytes.count(),
-        .variant_counts = [_]u32{0} ** 10,
-        .thunk_states = [_]u32{0} ** 5,
+        .variant_counts = @splat(0),
+        .thunk_states = @splat(0),
         .resolved_demanded = 0,
         .resolved_undemanded = 0,
-        .int_buckets = [_]u32{0} ** 5,
+        .int_buckets = @splat(0),
     };
 
     // TLAB tails are reserved but unfilled. Exclude them from every scan.

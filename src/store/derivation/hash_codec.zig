@@ -121,7 +121,7 @@ pub fn sha256Hex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
 }
 
 fn compressDigest(digest: []const u8) [20]u8 {
-    var compressed = [_]u8{0} ** 20;
+    var compressed: [20]u8 = @splat(0);
     for (digest, 0..) |byte, index| compressed[index % compressed.len] ^= byte;
     return compressed;
 }
@@ -190,7 +190,7 @@ test "nixBase32 round-trips through nixBase32Decode" {
 }
 
 test "nixBase32 all-zero input encodes to all-zero alphabet symbol" {
-    const zero = [_]u8{0} ** 20;
+    const zero: [20]u8 = @splat(0);
     const encoded = nixBase32(zero);
     for (encoded) |char| try std.testing.expectEqual(@as(u8, '0'), char);
 

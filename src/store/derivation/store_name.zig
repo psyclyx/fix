@@ -32,6 +32,6 @@ test "isValid accepts and rejects per Nix checkName" {
     try t.expect(!isValid("has/slash"));
     try t.expect(!isValid("has space"));
     // 211 bytes ok, 212 not.
-    try t.expect(isValid("a" ** 211));
-    try t.expect(!isValid("a" ** 212));
+    try t.expect(isValid(&@as([211]u8, @splat('a'))));
+    try t.expect(!isValid(&@as([212]u8, @splat('a'))));
 }

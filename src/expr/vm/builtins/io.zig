@@ -210,7 +210,7 @@ pub fn builtinReadDir(self: *VM, arg: Value) !Value {
     // The kind strings take one of four values; intern each once per call.
     var kind_values: [FileKindCount]?Value = @splat(null);
     for (dir_entries) |dir_entry| {
-        const ki = @intFromEnum(dir_entry.kind);
+        const ki = @backingInt(dir_entry.kind);
         const kv = kind_values[ki] orelse blk: {
             const v = Value.string(try self.intern.intern(dir_entry.kind.nixTypeName()));
             kind_values[ki] = v;
@@ -225,7 +225,7 @@ pub fn builtinReadDir(self: *VM, arg: Value) !Value {
     return Value.attrs(try self.heap.addAttrs(attrs.items));
 }
 
-const FileKindCount = @typeInfo(@import("store").FileCache.FileKind).@"enum".fields.len;
+const FileKindCount = @typeInfo(@import("store").FileCache.FileKind).@"enum".field_names.len;
 
 /// Children per `readdir_prefetch` task.
 const readdir_prefetch_batch = 32;

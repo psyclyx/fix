@@ -239,7 +239,7 @@ pub const Thunk = struct {
         // (pre-publication, so the plain read-modify-write is race-free).
         var f = future_cell;
         const raw = f.state.load(.monotonic);
-        f.state = .init(raw | (@as(u32, @intFromEnum(kind)) << future.flag_kind_shift));
+        f.state = .init(raw | (@as(u32, @backingInt(kind)) << future.flag_kind_shift));
         return .{
             .future = f,
             .created_tsc = nowCreatedTsc(),
@@ -404,7 +404,7 @@ pub const Thunk = struct {
     /// while the thunk is unresolved/evaluating (the states in which
     /// `target` is the live union arm).
     pub inline fn targetKind(self: *const Thunk) TargetKind {
-        return @enumFromInt((self.future.state.load(.monotonic) & future.flag_kind_mask) >> future.flag_kind_shift);
+        return @fromBackingInt(@intCast((self.future.state.load(.monotonic) & future.flag_kind_mask) >> future.flag_kind_shift));
     }
 
     pub inline fn noteSpecSubmitted(self: *Thunk, admitted: bool) void {

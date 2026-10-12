@@ -88,11 +88,11 @@ inline fn dispatch(vm: *VM, frame: *Frame, code: []const u8, ip: usize, stop_dep
         debug.checkVm(vm, "dispatch");
         debug.checkFrameSync(vm, frame, code, "dispatch");
     }
-    const op: OpCode = @enumFromInt(code[ip]);
+    const op: OpCode = @fromBackingInt(@intCast(code[ip]));
     if (comptime trace_log.enabled) {
         trace_log.op(vm.vm_trace, vm.workerId(), vm.frames_len, frame.chunk_id, @intCast(ip), op, vm.sp);
     }
-    return @call(.always_tail, handlers[@intFromEnum(op)], .{ vm, frame, code, ip + 1, stop_depth });
+    return @call(.always_tail, handlers[@backingInt(op)], .{ vm, frame, code, ip + 1, stop_depth });
 }
 
 /// End of chunk reached without a `ret` — ensure there's at least one
@@ -482,7 +482,7 @@ fn opBreakpoint(vm: *VM, frame: *Frame, code: []const u8, ip: usize, stop_depth:
     const h: Hit = if (vm.debug.breakpoints) |bps|
         bps.hit(frame.chunk_id, frame.chunk_ptr, off, vm.debugFrameDepth())
     else
-        .{ .original = @intFromEnum(OpCode.halt), .pause = false, .kind = .none };
+        .{ .original = @backingInt(OpCode.halt), .pause = false, .kind = .none };
     if (h.pause) {
         if (vm.debug.break_sink) |sink| {
             const reason: vm_mod.BreakReason = switch (h.kind) {
@@ -570,6 +570,15 @@ fn opBuildAttrsNamedPos(vm: *VM, frame: *Frame, code: []const u8, ip: usize, sto
     if (names_start + count > names.len or pos_start + pos_count > table.len) return error.InvalidBytecode;
     try objects.buildAttrsNamed(vm, names[names_start .. names_start + count], count, .borrowed(table[pos_start .. pos_start + pos_count]));
     return dispatch(vm, frame, code, ip + 12, stop_depth);
+}
+
+fn opBuildAttrsDynPos(vm: *VM, frame: *Frame, code: []const u8, ip: usize, stop_depth: usize) anyerror!void {
+    frame.ip = ip;
+    const pos_index = readU32(code, ip);
+    const table = frame.chunk_ptr.attr_pos;
+    if (pos_index >= table.len) return error.InvalidBytecode;
+    try objects.buildDynamicAttr(vm, table[pos_index].pos);
+    return dispatch(vm, frame, code, ip + 4, stop_depth);
 }
 
 fn opBuildList(vm: *VM, frame: *Frame, code: []const u8, ip: usize, stop_depth: usize) anyerror!void {
@@ -1042,10 +1051,10 @@ fn attrBindOp(comptime wide: bool) HandlerFn {
                 const entry_name = entries.names[entry_i];
                 const entry_value = entries.values[entry_i];
                 if (entry_name < name) {
-                    if (!allow_extra) return error.UnexpectedAttribute;
+                    if (!allow_extra) return trace.unexpectedArgument(vm, entry_name);
                     entry_i += 1;
                 } else if (entry_name > name) {
-                    if (slot != std.math.maxInt(u16)) return error.MissingAttribute;
+                    if (slot != std.math.maxInt(u16)) return trace.missingArgument(vm, name);
                     pair_i += 1;
                 } else {
                     if (slot != std.math.maxInt(u16)) {
@@ -1066,10 +1075,11 @@ fn attrBindOp(comptime wide: bool) HandlerFn {
             }
             while (pair_i < count) : (pair_i += 1) {
                 const pair_at = pairs_start + pair_i * stride;
+                const name: InternId = if (wide) readU32(code, pair_at) else @intCast(readU16(code, pair_at));
                 const slot = readU16(code, pair_at + name_len);
-                if (slot != std.math.maxInt(u16)) return error.MissingAttribute;
+                if (slot != std.math.maxInt(u16)) return trace.missingArgument(vm, name);
             }
-            if (!allow_extra and entry_i < entries.len()) return error.UnexpectedAttribute;
+            if (!allow_extra and entry_i < entries.len()) return trace.unexpectedArgument(vm, entries.names[entry_i]);
 
             _ = stack.pop(vm);
             return dispatch(vm, frame, code, pairs_end, stop_depth);
@@ -1108,8 +1118,8 @@ fn opGetAttrPathMixedOr(vm: *VM, frame: *Frame, code: []const u8, ip: usize, sto
         const tag = code[cur_ip];
         cur_ip += 1;
         switch (tag) {
-            @intFromEnum(bytecode_mod.MixedAttrSegmentTag.static) => cur_ip += 4,
-            @intFromEnum(bytecode_mod.MixedAttrSegmentTag.dynamic) => {},
+            @backingInt(bytecode_mod.MixedAttrSegmentTag.static) => cur_ip += 4,
+            @backingInt(bytecode_mod.MixedAttrSegmentTag.dynamic) => {},
             else => return error.InvalidBytecode,
         }
     }
@@ -1137,8 +1147,8 @@ fn opHasAttrPathMixed(vm: *VM, frame: *Frame, code: []const u8, ip: usize, stop_
         const tag = code[cur_ip];
         cur_ip += 1;
         switch (tag) {
-            @intFromEnum(bytecode_mod.MixedAttrSegmentTag.static) => cur_ip += 4,
-            @intFromEnum(bytecode_mod.MixedAttrSegmentTag.dynamic) => {},
+            @backingInt(bytecode_mod.MixedAttrSegmentTag.static) => cur_ip += 4,
+            @backingInt(bytecode_mod.MixedAttrSegmentTag.dynamic) => {},
             else => return error.InvalidBytecode,
         }
     }
@@ -1280,6 +1290,7 @@ fn handlerFor(comptime op: OpCode) HandlerFn {
         .attrs_new_named => opBuildAttrsNamed,
         .attrs_new_named_pos_srt => opBuildAttrsNamedPosSorted,
         .attrs_new_named_pos => opBuildAttrsNamedPos,
+        .attrs_new_dyn_pos => opBuildAttrsDynPos,
         .list_new => opBuildList,
         .attrs_merge_strict => opMergeAttrsStrict,
         .attrs_merge => opMergeAttrs,
@@ -1347,8 +1358,9 @@ fn handlerFor(comptime op: OpCode) HandlerFn {
 
 const handlers: [opcode.count]HandlerFn = blk: {
     var table: [opcode.count]HandlerFn = undefined;
-    for (@typeInfo(OpCode).@"enum".fields) |field| {
-        table[field.value] = handlerFor(@field(OpCode, field.name));
+    const op_info = @typeInfo(OpCode).@"enum";
+    for (op_info.field_names, op_info.field_values) |field_name, field_value| {
+        table[field_value] = handlerFor(@field(OpCode, field_name));
     }
     break :blk table;
 };

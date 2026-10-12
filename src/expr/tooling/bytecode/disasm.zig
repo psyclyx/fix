@@ -199,7 +199,7 @@ fn writeChunkAt(
             try endRow(writer, bg, env.prefixWidth() + 10, env);
             continue;
         }
-        const op: OpCode = @enumFromInt(op_byte);
+        const op: OpCode = @fromBackingInt(@intCast(op_byte));
         ip += 1;
 
         // Decode the operands into scratch first: we need the full instruction
@@ -231,7 +231,7 @@ fn writeChunkAt(
         try writeGuide(writer, cc, bg, options.color_depth);
         try writeOffset(writer, start, current, bg, options.color_depth);
         try writer.writeAll("  ");
-        var seq: usize = @intFromEnum(op) + 1;
+        var seq: usize = @backingInt(op) + 1;
         var head: Line = undefined;
         head.reset();
         const head_len = buildHead(&head, op, chunk, start, symbols, up_names, local_names, operand_text, ip, &seq);
@@ -438,7 +438,7 @@ fn writeOffset(writer: *std.Io.Writer, off: usize, current: bool, bg: ?[3]u8, co
 fn writeMnemonic(writer: *std.Io.Writer, op: OpCode, bg: ?[3]u8, color_depth: ColorDepth) !void {
     const name = @tagName(op);
     if (color_depth.enabled()) {
-        const rgb = byteRgb(@intFromEnum(op));
+        const rgb = byteRgb(@backingInt(op));
         try setFg(writer, rgb, color_depth);
         try writer.writeAll(name);
         try sgrReset(writer, bg, color_depth);
@@ -889,8 +889,8 @@ fn chunkIdWide(op: OpCode) bool {
 pub fn builtinName(id: u64) ?[]const u8 {
     const builtins = @import("runtime").builtins;
     const BuiltinId = builtins.BuiltinId;
-    inline for (@typeInfo(BuiltinId).@"enum".fields) |f| {
-        if (f.value == id) return builtins.displayName(@enumFromInt(f.value));
+    inline for (@typeInfo(BuiltinId).@"enum".field_values) |field_value| {
+        if (field_value == id) return builtins.displayName(@fromBackingInt(@intCast(field_value)));
     }
     return null;
 }
@@ -1407,7 +1407,7 @@ fn writeOperandTail(
     // Guide colors: level 0 is the mnemonic (byteRgb of the opcode); list
     // members hang a level deeper under a count line whose color is g[1].
     var g: [3][3]u8 = undefined;
-    g[0] = byteRgb(@intFromEnum(op));
+    g[0] = byteRgb(@backingInt(op));
     switch (op) {
         .closure, .closure_w => {
             // The chunk id rode the mnemonic line; only the upvalue count
@@ -2378,7 +2378,7 @@ test "operand lines truncate to an ellipsis instead of failing" {
     // so the caller still steps over every byte the instruction owns.
     line.reset();
     line.group(0, 3, "{s}", .{"abc"});
-    line.group(3, 4, "{s}", .{[_]u8{'x'} ** (line.buf.len + 1)});
+    line.group(3, 4, "{s}", .{&@as([line.buf.len + 1]u8, @splat('x'))});
     line.sealTruncation();
     try std.testing.expectEqual(@as(u16, 7), line.total());
     try std.testing.expectEqualStrings("…", line.toks[line.n - 1].text);

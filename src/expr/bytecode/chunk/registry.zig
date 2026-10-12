@@ -126,7 +126,7 @@ pub const ChunkRegistry = struct {
     /// first id. Hash shards let compiling workers register concurrently.
     /// Existing candidates are compared outside the shard lock; candidates
     /// added by a racer are rechecked while locked.
-    dedup_shards: [dedup_shard_count]DedupShard = [_]DedupShard{.{}} ** dedup_shard_count,
+    dedup_shards: [dedup_shard_count]DedupShard = @splat(.{}),
     /// Single-threaded mode: when the owner guarantees exactly one thread
     /// ever registers chunks (a `--workers=1` evaluator; set before anything
     /// runs), `registerDeduped` skips the dedup shard mutexes and `register`
@@ -357,7 +357,7 @@ pub const ChunkRegistry = struct {
     // perturb dedup.
     comptime {
         const chunk_field_count = 14;
-        if (std.meta.fields(Chunk).len != chunk_field_count)
+        if (@typeInfo(Chunk).@"struct".field_names.len != chunk_field_count)
             @compileError("Chunk changed shape: update contentHash + contentEql (or route diagnostic-only metadata through the registry sidecar), then adjust chunk_field_count.");
     }
 
@@ -713,7 +713,7 @@ pub const ChunkRegistry = struct {
             .code_bytes = 0,
             .const_count = 0,
             .source_map_entries = 0,
-            .size_buckets = [_]u32{0} ** 6,
+            .size_buckets = @splat(0),
             .max_code_bytes = 0,
             .with_strictness = 0,
             .speculatable = 0,
@@ -753,9 +753,9 @@ test "chunk builder emits opcodes and operands into the code stream" {
     defer chunk.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 7), chunk.code.len);
-    try std.testing.expectEqual(@intFromEnum(OpCode.loc_get), chunk.code[0]);
+    try std.testing.expectEqual(@backingInt(OpCode.loc_get), chunk.code[0]);
     try std.testing.expectEqual(@as(u8, 3), chunk.code[1]);
-    try std.testing.expectEqual(@intFromEnum(OpCode.jump), chunk.code[2]);
+    try std.testing.expectEqual(@backingInt(OpCode.jump), chunk.code[2]);
     try std.testing.expectEqual(@as(u32, 10), readU32Inline(chunk.code, 3));
 }
 
@@ -815,7 +815,7 @@ test "emitConstant writes a constant op referencing the new pool index" {
 
     try std.testing.expectEqual(@as(usize, 1), chunk.constants.len);
     try std.testing.expectEqual(@as(i64, 99), chunk.constants[0].asInt());
-    try std.testing.expectEqual(@intFromEnum(OpCode.push_const), chunk.code[0]);
+    try std.testing.expectEqual(@backingInt(OpCode.push_const), chunk.code[0]);
     try std.testing.expectEqual(@as(u16, 0), readU16Inline(chunk.code, 1));
 }
 
@@ -847,7 +847,7 @@ test "classifyTrivialBody recognizes a push_const_ret-only thunk body" {
     // emitConstant writes a plain `push_const` op; fuse it into
     // `push_const_ret` by hand the way the compiler's emit.zig would,
     // then append halt so the shape matches the classifier's expectation.
-    builder.code.items[0] = @intFromEnum(OpCode.push_const_ret);
+    builder.code.items[0] = @backingInt(OpCode.push_const_ret);
     try builder.writeOp(allocator, .halt);
 
     var chunk = try builder.finish(allocator, 0);

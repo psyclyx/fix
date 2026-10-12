@@ -19,8 +19,10 @@ fn addUnitTest(b: *std.Build, options: UnitTest) *std.Build.Step.Run {
         .filters = options.filters,
         .use_llvm = true,
     });
-    compile.setExecCmd(&.{ "timeout", "--kill-after=5s", options.timeout, null });
-    return b.addRunArtifact(compile);
+
+    const run = b.addSystemCommand(&.{ "timeout", "--kill-after=5s", options.timeout });
+    run.addArtifactArg2(compile, .{});
+    return run;
 }
 
 pub fn build(b: *std.Build) void {
@@ -37,7 +39,7 @@ pub fn build(b: *std.Build) void {
         @panic("-Dtsan currently supports only x86_64-linux");
     const strip: ?bool = if (profile or tsan) false else null;
     const omit_frame_pointer: ?bool = if (profile or tsan) false else null;
-    const debug_checks = debug_checks_opt orelse (optimize == .Debug);
+    const debug_checks = debug_checks_opt orelse (optimize == .debug);
 
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", manifest.version);
@@ -122,8 +124,8 @@ pub fn build(b: *std.Build) void {
     // cpuid. Skipped where `base.sha256` never references the extern symbols.
     if (target.result.cpu.arch == .x86_64 and target.result.os.tag != .windows) {
         var hw_query = target.query;
-        hw_query.cpu_features_add.addFeature(@intFromEnum(std.Target.x86.Feature.sha));
-        hw_query.cpu_features_add.addFeature(@intFromEnum(std.Target.x86.Feature.avx2));
+        hw_query.cpu_features_add.addFeature(@backingInt(std.Target.x86.Feature.sha));
+        hw_query.cpu_features_add.addFeature(@backingInt(std.Target.x86.Feature.avx2));
         const sha256_hw_obj = b.addObject(.{
             .name = "sha256_hw",
             .root_module = b.createModule(.{
@@ -253,9 +255,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     // Run tests as ordinary terminal processes. The repository-owned runner
     // reports the active test and lets the OS terminate a crashing process
@@ -372,7 +372,7 @@ pub fn build(b: *std.Build) void {
     const run_stress = b.addSystemCommand(&.{ "timeout", "--kill-after=5s", "10m" });
     run_stress.addArtifactArg(stress_exe);
     run_stress.has_side_effects = true;
-    if (b.args) |args| run_stress.addArgs(args);
+    run_stress.addPassthruArgs();
     const stress_step = b.step("stress-concurrency", "Run seeded concurrency stress and semantic differentials");
     stress_step.dependOn(&run_stress.step);
 
@@ -392,19 +392,23 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_cli_tests.step);
 
     const format_check = b.addFmt(.{
-        .paths = &.{ "build.zig", "src", "tools" },
+        .paths = &.{
+            b.path("build.zig"),
+            b.path("src"),
+            b.path("tools"),
+        },
         .check = true,
     });
 
     const run_structure_check = b.addSystemCommand(&.{"bash"});
     run_structure_check.addFileArg(b.path("tools/structure_check.sh"));
-    run_structure_check.addArg(b.pathFromRoot("."));
+    run_structure_check.addDirectoryArg(b.path("."));
     const structure_check_step = b.step("structure-check", "Check durable module and ownership boundaries");
     structure_check_step.dependOn(&run_structure_check.step);
 
     const run_model_check = b.addSystemCommand(&.{"bash"});
     run_model_check.addFileArg(b.path("tools/check_models.sh"));
-    run_model_check.addArg(b.pathFromRoot("."));
+    run_model_check.addDirectoryArg(b.path("."));
     const model_check_step = b.step("check-models", "Model-check concurrency protocols with TLC");
     model_check_step.dependOn(&run_model_check.step);
 
@@ -434,7 +438,7 @@ pub fn build(b: *std.Build) void {
     bench_mod.addImport("syntax", syntax_mod);
     const bench_exe = b.addExecutable(.{ .name = "parse-bench", .root_module = bench_mod, .use_llvm = true });
     const run_bench = b.addRunArtifact(bench_exe);
-    if (b.args) |args| run_bench.addArgs(args);
+    run_bench.addPassthruArgs();
     const bench_step = b.step("bench-parse", "Parse microbenchmark (front-end only; eval benchmark lives in bench/harness.nix)");
     bench_step.dependOn(&run_bench.step);
 
@@ -460,10 +464,10 @@ pub fn build(b: *std.Build) void {
     run_lang.step.dependOn(b.getInstallStep());
     run_lang.has_side_effects = true;
     run_lang.addArg("--repo");
-    run_lang.addArg(b.pathFromRoot("."));
+    run_lang.addDirectoryArg(b.path("."));
     run_lang.addArg("--fix");
-    run_lang.addArg(b.pathFromRoot("zig-out/bin/fix"));
-    if (b.args) |args| run_lang.addArgs(args);
+    run_lang.addFileArg(b.path("zig-out/bin/fix"));
+    run_lang.addPassthruArgs();
     lang_step.dependOn(&run_lang.step);
 
     // Bench-fixture differential correctness: evaluate every bench/workloads
@@ -484,14 +488,14 @@ pub fn build(b: *std.Build) void {
     run_bench_check.step.dependOn(b.getInstallStep());
     run_bench_check.has_side_effects = true;
     run_bench_check.addArg("--repo");
-    run_bench_check.addArg(b.pathFromRoot("."));
+    run_bench_check.addDirectoryArg(b.path("."));
     run_bench_check.addArg("--fix");
-    run_bench_check.addArg(b.pathFromRoot("zig-out/bin/fix"));
+    run_bench_check.addFileArg(b.path("zig-out/bin/fix"));
     // TSan's 10-20x eval multiplier makes the plain 600s per-eval budget read
     // large realworld fixtures as hung. Raised default first, so an explicit
     // `-- --eval-timeout-secs N` still wins (last occurrence is parsed).
     if (tsan) run_bench_check.addArgs(&.{ "--eval-timeout-secs", "3600" });
-    if (b.args) |args| run_bench_check.addArgs(args);
+    run_bench_check.addPassthruArgs();
     bench_check_step.dependOn(&run_bench_check.step);
 
     // End-to-end CLI suites (test/e2e/): drive the freshly built `fix` through
@@ -505,7 +509,7 @@ pub fn build(b: *std.Build) void {
     run_e2e.addFileArg(b.path("test/e2e/run.sh"));
     run_e2e.step.dependOn(b.getInstallStep());
     run_e2e.has_side_effects = true;
-    if (b.args) |args| run_e2e.addArgs(args);
+    run_e2e.addPassthruArgs();
     e2e_step.dependOn(&run_e2e.step);
     test_step.dependOn(&run_e2e.step);
 
@@ -521,6 +525,6 @@ pub fn build(b: *std.Build) void {
     run_nixpkgs.addFileArg(b.path("test/nixpkgs/run.sh"));
     run_nixpkgs.step.dependOn(b.getInstallStep());
     run_nixpkgs.has_side_effects = true;
-    if (b.args) |args| run_nixpkgs.addArgs(args);
+    run_nixpkgs.addPassthruArgs();
     nixpkgs_step.dependOn(&run_nixpkgs.step);
 }

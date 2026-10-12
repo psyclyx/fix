@@ -79,7 +79,7 @@ fn compileMixedAttrEntryViews(self: *Compiler, entries: []const AttrEntryView, r
         if (!isDynamicAttrEntryView(self, entry)) continue;
         try compileDynamicAttrViewName(self, entry);
         try compileDynamicAttrViewValueThunk(self, entry);
-        try emit.emitOpU16(self, .attrs_new, 1);
+        try emit.emitDynamicAttr(self, dynamicAttrOffset(entry));
         try emit.emitOp(self, .attrs_merge_strict);
     }
 }
@@ -117,7 +117,7 @@ fn compileMixedRecursiveAttrEntryViews(self: *Compiler, entries: []const AttrEnt
         if (!isDynamicAttrEntryView(self, entry)) continue;
         try compileDynamicAttrViewName(self, entry);
         try compileDynamicAttrViewValueThunk(self, entry);
-        try emit.emitOpU16(self, .attrs_new, 1);
+        try emit.emitDynamicAttr(self, dynamicAttrOffset(entry));
         try emit.emitOp(self, .attrs_merge_strict);
     }
 
@@ -142,6 +142,11 @@ fn staticAttrEntryViewCount(self: *const Compiler, entries: []const AttrEntryVie
 fn isDynamicAttrEntryView(self: *const Compiler, entry: AttrEntryView) bool {
     return entry.dynamic_name != null or
         (entry.path.len > 0 and attr_names.hasInterpolation(self, entry.path[0]));
+}
+
+fn dynamicAttrOffset(entry: AttrEntryView) u32 {
+    if (entry.dynamic_name != null) return entry.dynamic_offset;
+    return (entry.origin orelse entry.path[0]).offset;
 }
 
 fn compileDynamicAttrViewName(self: *Compiler, entry: AttrEntryView) !void {
@@ -602,6 +607,7 @@ pub fn compileExtendedAttrSetLiteralThunk(self: *Compiler, leaves: []const AttrE
             view.* = .{
                 .path = entry.path,
                 .dynamic_name = entry.dynamic_name,
+                .dynamic_offset = entry.dynamic_offset,
                 .expr = entry.expr,
                 .inherit_outer = entry.inherit_outer,
                 .inherit_group = entry.inherit_group,
@@ -703,6 +709,7 @@ fn attrEntryViews(self: *Compiler, entries: []const Node.AttrSetEntry) ![]AttrEn
         view.* = .{
             .path = entry.path,
             .dynamic_name = entry.dynamic_name,
+            .dynamic_offset = entry.dynamic_offset,
             .expr = entry.expr,
             .inherit_outer = entry.inherit_outer,
             .inherit_group = entry.inherit_group,

@@ -295,7 +295,7 @@ test "bounded background store transfers blob ownership and flushes publication"
     defer store.deinit();
     _ = try std.Io.Dir.cwd().statFile(testing.io, sentinel, .{});
     var writes: std.atomic.Value(u64) = .init(0);
-    const key_value: codec.Key = [_]u8{0x5a} ** 32;
+    const key_value: codec.Key = @splat(0x5a);
     try testing.expect(store.enqueueOwned(key_value, try testing.allocator.dupe(u8, "payload"), &writes));
     try testing.expect(!store.enqueueOwned(key_value, try testing.allocator.dupe(u8, "too-large"), &writes));
     store.flush();

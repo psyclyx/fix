@@ -95,7 +95,7 @@ const fifo_mode: u32 = 0o10000 | 0o666; // S_IFIFO | rw-rw-rw-
 
 /// A FIFO inode (unprivileged).
 pub fn mkfifoAt(gpa: std.mem.Allocator, path: []const u8) !void {
-    const z = try gpa.dupeZ(u8, path);
+    const z = try gpa.dupeSentinel(u8, path, 0);
     defer gpa.free(z);
     if (comptime builtin.os.tag == .linux) {
         const rc: isize = @bitCast(std.os.linux.mknod(z.ptr, fifo_mode, 0));

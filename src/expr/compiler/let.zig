@@ -612,6 +612,7 @@ fn compileLetRootBinding(self: *Compiler, bindings: []const Node.Binding, member
             .expr = binding.expr,
             .inherit_outer = binding.inherit_outer,
             .inherit_group = binding.inherit_group,
+            .origin = if (leafy) null else binding.path[0],
         };
         if (leafy) leaf_i += 1 else tail_i += 1;
     }

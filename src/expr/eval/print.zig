@@ -336,7 +336,7 @@ const ValuePrinter = struct {
     }
 
     fn enter(self: *Self, kind: SeenKind, id: types.ObjectId) !bool {
-        const key = (@as(u64, id) << 2) | @intFromEnum(kind);
+        const key = (@as(u64, id) << 2) | @backingInt(kind);
         const gop = try self.seen.getOrPut(self.host.allocator, key);
         return !gop.found_existing;
     }

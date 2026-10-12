@@ -480,7 +480,14 @@ fn normalizeDerivation(self: *VM, attrs_id: ObjectId, drv_name: []const u8, outp
     errdefer env.deinit(self.allocator);
     const original_attrs = try self.heap.materializeAttrs(attrs_id);
     if (structured) {
-        const json = try structuredAttrsJson(self, attrs_id, output_names.names, output_names.explicit, ignore_nulls, &inputs, &owned_strings);
+        if (self.heap.getAttrValue(attrs_id, try self.intern.intern("__json"))) |_| {
+            try vm_trace.setErrorMessage(self, "a `__json` attribute cannot be passed to builtins.derivationStrict when structured attributes are enabled");
+            return error.InvalidDerivation;
+        } else |err| switch (err) {
+            error.MissingAttribute => {},
+            else => return err,
+        }
+        const json = try structuredAttrsJson(self, attrs_id, output_names.explicit, ignore_nulls, &inputs, &owned_strings);
         try owned_strings.append(self.allocator, json);
         try env.append(self.allocator, .{ .name = "__json", .value = json });
     } else {
@@ -689,7 +696,6 @@ fn joinedOutputNames(self: *VM, names: []const InternId) ![]u8 {
 fn structuredAttrsJson(
     self: *VM,
     attrs_id: ObjectId,
-    outputs: []const InternId,
     explicit_outputs: bool,
     ignore_nulls: bool,
     inputs: *DerivationInputs,
@@ -710,7 +716,6 @@ fn structuredAttrsJson(
         if (std.mem.eql(u8, name, "__ignoreNulls")) continue;
         if (std.mem.eql(u8, name, "args")) continue;
         if (std.mem.eql(u8, name, "outputs") and !explicit_outputs) continue;
-        if (isDerivationOutputAttr(self, name, outputs)) continue;
         if (ignore_nulls and (try vm_force.forceValue(self, entry.value)).isNull()) continue;
         if (!first) try out.append(self.allocator, ',');
         first = false;
@@ -804,6 +809,9 @@ fn appendJsonString(self: *VM, out: *std.ArrayListUnmanaged(u8), text: []const u
         '\n' => try out.appendSlice(self.allocator, "\\n"),
         '\r' => try out.appendSlice(self.allocator, "\\r"),
         '\t' => try out.appendSlice(self.allocator, "\\t"),
+        0x08 => try out.appendSlice(self.allocator, "\\b"),
+        0x0c => try out.appendSlice(self.allocator, "\\f"),
+        0x00...0x07, 0x0b, 0x0e...0x1f => try appendJsonFmt(self, out, "\\u{x:0>4}", .{char}),
         else => try out.append(self.allocator, char),
     };
     try out.append(self.allocator, '"');

@@ -72,7 +72,7 @@ pub fn run(
                     res.stderr,
                     if (res.stderr.len == 0 or res.stderr[res.stderr.len - 1] == '\n') "" else "\n",
                     @tagName(sig),
-                    @intFromEnum(sig),
+                    @backingInt(sig),
                 },
             );
             gpa.free(res.stderr);
@@ -86,7 +86,7 @@ pub fn run(
                     res.stderr,
                     if (res.stderr.len == 0 or res.stderr[res.stderr.len - 1] == '\n') "" else "\n",
                     @tagName(sig),
-                    @intFromEnum(sig),
+                    @backingInt(sig),
                 },
             );
             gpa.free(res.stderr);

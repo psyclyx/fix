@@ -33,7 +33,7 @@ fn collectRefsInto(chunk: *const Chunk, refs: *std.AutoArrayHashMapUnmanaged(Chu
             ip += 1;
             continue;
         }
-        const op: opcode.OpCode = @enumFromInt(op_byte);
+        const op: opcode.OpCode = @fromBackingInt(@intCast(op_byte));
         ip += 1;
         for (opcode.layout(op)) |field| {
             switch (field) {
@@ -499,8 +499,8 @@ pub const CodeDedupCensus = struct {
         while (id < registry.count()) : (id += 1) {
             const chunk = registry.get(id) orelse continue;
             const captures = captureCensus(allocator, chunk) catch continue;
-            inline for (std.meta.fields(CaptureCensus)) |field| {
-                @field(out.captures, field.name) += @field(captures, field.name);
+            inline for (@typeInfo(CaptureCensus).@"struct".field_names) |field_name| {
+                @field(out.captures, field_name) += @field(captures, field_name);
             }
         }
         return out;
@@ -522,7 +522,7 @@ pub fn captureCensus(allocator: std.mem.Allocator, chunk: *const Chunk) !Capture
             ip += 1;
             continue;
         }
-        const op: opcode.OpCode = @enumFromInt(op_byte);
+        const op: opcode.OpCode = @fromBackingInt(@intCast(op_byte));
         ip += 1;
         const inline_count_at: ?usize = switch (op) {
             .thunk, .closure_cap => ip + 2,

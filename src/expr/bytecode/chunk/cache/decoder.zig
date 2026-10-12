@@ -268,7 +268,7 @@ fn fixSortedInvariantsAt(
                     }
                 }
                 if (!ascending) {
-                    code[ip] = @intFromEnum(@as(OpCode, if (op == .attrs_new_named_srt)
+                    code[ip] = @backingInt(@as(OpCode, if (op == .attrs_new_named_srt)
                         .attrs_new_named
                     else
                         .attrs_new_named_pos));

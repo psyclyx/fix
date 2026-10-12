@@ -980,7 +980,7 @@ pub const Engine = struct {
         const abs = try std.fs.path.resolve(self.allocator, &.{ base, file_path });
         defer self.allocator.free(abs);
         const dir = std.fs.path.dirname(abs) orelse abs;
-        const owned = try self.allocator.dupeZ(u8, dir);
+        const owned = try self.allocator.dupeSentinel(u8, dir, 0);
         if (self.sources.base_path) |old| self.allocator.free(old);
         self.sources.base_path = owned;
     }
@@ -1673,14 +1673,14 @@ pub const Engine = struct {
     /// one slice field hashes its contents.
     fn policyFingerprint(policy: *const LanguagePolicy) u64 {
         var h = std.hash.Wyhash.init(0xF17C_CACE);
-        inline for (@typeInfo(LanguagePolicy).@"struct".fields) |field| {
-            if (comptime std.mem.eql(u8, field.name, "allowed_path_roots")) {
+        inline for (@typeInfo(LanguagePolicy).@"struct".field_names) |field_name| {
+            if (comptime std.mem.eql(u8, field_name, "allowed_path_roots")) {
                 for (policy.allowed_path_roots) |root| {
                     h.update(root);
                     h.update(&.{0});
                 }
             } else {
-                std.hash.autoHash(&h, @field(policy.*, field.name));
+                std.hash.autoHash(&h, @field(policy.*, field_name));
             }
         }
         return h.final();

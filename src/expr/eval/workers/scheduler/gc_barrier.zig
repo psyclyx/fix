@@ -14,7 +14,7 @@ pub const Barrier = struct {
         releasing,
     };
 
-    state: std.atomic.Value(u8) = .init(@intFromEnum(State.idle)),
+    state: std.atomic.Value(u8) = .init(@backingInt(State.idle)),
     worker_parked: []std.atomic.Value(bool),
     mark_open: std.atomic.Value(bool) = .init(false),
     mark_hook: ?MarkHook = null,
@@ -31,13 +31,13 @@ pub const Barrier = struct {
     }
 
     pub inline fn requested(self: *const Barrier) bool {
-        return self.state.load(.acquire) == @intFromEnum(State.collecting);
+        return self.state.load(.acquire) == @backingInt(State.collecting);
     }
 
     pub fn tryBegin(self: *Barrier) bool {
         return self.state.cmpxchgStrong(
-            @intFromEnum(State.idle),
-            @intFromEnum(State.collecting),
+            @backingInt(State.idle),
+            @backingInt(State.collecting),
             .acq_rel,
             .monotonic,
         ) == null;
@@ -55,12 +55,12 @@ pub const Barrier = struct {
         // new collector until every parked flag from this generation is down.
         // A reusable boolean has an ABA window here: a second collector can
         // raise it again while a slow peer is still leaving the first cycle.
-        self.state.store(@intFromEnum(State.releasing), .release);
+        self.state.store(@backingInt(State.releasing), .release);
         for (self.worker_parked, 0..) |*flag, id| {
             if (id == collector_id) continue;
             while (flag.load(.acquire)) std.atomic.spinLoopHint();
         }
-        self.state.store(@intFromEnum(State.idle), .release);
+        self.state.store(@backingInt(State.idle), .release);
     }
 
     pub fn setMarkHook(self: *Barrier, hook: MarkHook) void {

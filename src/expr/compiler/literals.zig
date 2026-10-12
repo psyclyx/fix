@@ -284,7 +284,7 @@ pub fn compileSearchPath(self: *Compiler, node: *const Node) !void {
     // baked-in static search path) is what lets a local `let __nixPath = …`
     // override the lookup lexically. `findFile` itself honors `prefix=path`
     // entries and the synthetic `<nix/fetchurl.nix>` corepkgs file.
-    try self.builder.emitConstant(self.allocator, Value.builtin(@intFromEnum(builtins.BuiltinId.findFile)));
+    try self.builder.emitConstant(self.allocator, Value.builtin(@backingInt(builtins.BuiltinId.findFile)));
     try emitNixPathRef(self);
     try emit.emitOp(self, .call);
     try self.builder.emitConstant(self.allocator, Value.string(name_id));
@@ -399,7 +399,7 @@ pub fn compileCurPos(self: *Compiler, atom: Node.Atom) !void {
 
 pub fn emitAmbientBuiltin(self: *Compiler, name: []const u8) !bool {
     if (builtins.ambientIdForName(name)) |id| {
-        try self.builder.emitConstant(self.allocator, Value.builtin(@intFromEnum(id)));
+        try self.builder.emitConstant(self.allocator, Value.builtin(@backingInt(id)));
         return true;
     }
 

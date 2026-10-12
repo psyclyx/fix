@@ -32,7 +32,7 @@ pub const computeFlakeLock = flakes.computeFlakeLock;
 pub fn applyBuiltin(self: *VM, builtin_id: u16, args: []const Value) !Value {
     const t = prof.startBuiltin(builtin_id);
     defer prof.end(.apply_builtin, t);
-    const id: BuiltinId = @enumFromInt(builtin_id);
+    const id: BuiltinId = @fromBackingInt(@intCast(builtin_id));
     const arity = builtins_mod.arity(id);
     if (args.len < arity) return shared.makeBuiltinClosure(self, builtin_id, args);
     if (args.len > arity) return error.TooManyArguments;

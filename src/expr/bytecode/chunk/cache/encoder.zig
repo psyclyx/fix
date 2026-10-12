@@ -284,7 +284,7 @@ const Writer = struct {
         const copy = try scratch.dupe(u8, code);
         var ip: usize = 0;
         while (ip < copy.len) {
-            const op: OpCode = @enumFromInt(copy[ip]);
+            const op: OpCode = @fromBackingInt(@intCast(copy[ip]));
             var off = ip + 1;
             for (opcode_mod.layout(op)) |f| off += try self.normalizeField(copy, op, f, off);
             ip = off;

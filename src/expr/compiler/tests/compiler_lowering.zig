@@ -388,11 +388,15 @@ test "scope nesting past a byte's range compiles instead of wrapping the depth c
     // ceiling. When `scope_depth` was a u8 the 256th increment overflowed
     // (Debug) or wrapped, leaving `endScope` popping locals against a bogus
     // depth (ReleaseFast).
-    const deep = try ev.evaluate("with { a = 1; }; " ** 300 ++ "42");
+    const deep = try ev.evaluate(
+        @as([300 * "with { a = 1; }; ".len]u8, @bitCast(@as([300]["with { a = 1; }; ".len]u8, @splat("with { a = 1; }; ".*)))) ++ "42",
+    );
     try testing.expectEqual(@as(i64, 42), deep.asInt());
-    // Resolving a name THROUGH the chain is bounded separately — `with_lookup`
-    // encodes its scope count in one byte — and must stay a clean error.
-    try testing.expectError(error.TooManyWithScopes, ev.evaluate("with { a = 1; }; " ** 256 ++ "a"));
+    // Resolving a name THROUGH the chain is bounded separately: `with_lookup`
+    // encodes its scope count in one byte, and must stay a clean error.
+    try testing.expectError(error.TooManyWithScopes, ev.evaluate(
+        @as([256 * "with { a = 1; }; ".len]u8, @bitCast(@as([256]["with { a = 1; }; ".len]u8, @splat("with { a = 1; }; ".*)))) ++ "a",
+    ));
 }
 
 test "dynamic-name bindings move only within an unchanged with-chain" {

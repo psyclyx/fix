@@ -85,8 +85,8 @@ test "range work atomic transport round-trips both variants" {
 const range_batch_size = 256;
 
 fn rangeWorkLessThan(_: void, a: RangeWork, b: RangeWork) bool {
-    const a_tag = @intFromEnum(std.meta.activeTag(a));
-    const b_tag = @intFromEnum(std.meta.activeTag(b));
+    const a_tag = @backingInt(std.meta.activeTag(a));
+    const b_tag = @backingInt(std.meta.activeTag(b));
     if (a_tag != b_tag) return a_tag < b_tag;
     return switch (a) {
         .values => |ar| blk: {
@@ -1096,8 +1096,10 @@ test "gc reclaim: heap strings survive marking; swept byte ranges poison and reu
 
     // Equal lengths so the dead range is an exact best-fit for the reuse
     // allocation below.
-    const live_text = "live-" ++ "x" ** 55;
-    const dead_text = "dead-" ++ "y" ** 55;
+    const live_x: [55]u8 = @splat('x');
+    const dead_y: [55]u8 = @splat('y');
+    const live_text = "live-" ++ live_x;
+    const dead_text = "dead-" ++ dead_y;
     const live_id = try heap.addHeapString(live_text);
     const dead_id = try heap.addHeapString(dead_text);
     // The dangling borrow a native caller could still hold across a

@@ -348,7 +348,7 @@ pub const DaemonStore = struct {
     pub fn buildPaths(self: *DaemonStore, derived_paths: []const []const u8, sink: ?BuildSink, mode: BuildMode) !void {
         try self.beginOp(.build_paths);
         try wire.writeStrings(self.w(), derived_paths);
-        try wire.writeInt(self.w(), @intFromEnum(mode));
+        try wire.writeInt(self.w(), @backingInt(mode));
         self.build_sink = sink;
         defer self.build_sink = null;
         try self.flushAndDrain();
@@ -424,7 +424,7 @@ pub const DaemonStore = struct {
     // --- op plumbing ------------------------------------------------------
 
     fn beginOp(self: *DaemonStore, op: wire.Op) !void {
-        try wire.writeInt(self.w(), @intFromEnum(op));
+        try wire.writeInt(self.w(), @backingInt(op));
     }
 
     /// Flush the request and drain the STDERR_* sideband up to the response.
@@ -500,8 +500,8 @@ pub const DaemonStore = struct {
     };
 
     const Fields = struct {
-        strings: [4]?FieldString = .{null} ** 4,
-        ints: [4]?u64 = .{null} ** 4,
+        strings: [4]?FieldString = @splat(null),
+        ints: [4]?u64 = @splat(null),
 
         fn deinit(self: *Fields, allocator: std.mem.Allocator) void {
             for (self.strings) |field| if (field) |value| allocator.free(value.allocation);
@@ -549,7 +549,7 @@ pub const DaemonStore = struct {
     fn readStartActivity(self: *DaemonStore) !void {
         const act = try wire.readInt(self.r());
         _ = try wire.readInt(self.r()); // level
-        const activity_type: ActivityType = @enumFromInt(try wire.readInt(self.r()));
+        const activity_type: ActivityType = @fromBackingInt(@intCast(try wire.readInt(self.r())));
         try wire.skipString(self.r()); // daemon-rendered text; presentation owns labels
         var fields = try self.readFields();
         defer fields.deinit(self.allocator);
@@ -571,7 +571,7 @@ pub const DaemonStore = struct {
 
     fn readResult(self: *DaemonStore) !void {
         const act = try wire.readInt(self.r());
-        const result_type: ResultType = @enumFromInt(try wire.readInt(self.r()));
+        const result_type: ResultType = @fromBackingInt(@intCast(try wire.readInt(self.r())));
         var fields = try self.readFields();
         defer fields.deinit(self.allocator);
         switch (result_type) {

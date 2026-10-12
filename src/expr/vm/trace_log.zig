@@ -169,13 +169,13 @@ pub const VmTrace = struct {
         opc: OpCode,
         sp: u32,
     ) void {
-        self.writeU8(@intFromEnum(EventKind.op));
+        self.writeU8(@backingInt(EventKind.op));
         self.writeU64(seq);
         self.writeU8(worker_id);
         self.writeU32(frames_len);
         self.writeU32(chunk_id);
         self.writeU32(ip);
-        self.writeU8(@intFromEnum(opc));
+        self.writeU8(@backingInt(opc));
         self.writeU32(sp);
     }
 
@@ -188,7 +188,7 @@ pub const VmTrace = struct {
         chunk_id: ChunkId,
         extra: u32,
     ) void {
-        self.writeU8(@intFromEnum(kind));
+        self.writeU8(@backingInt(kind));
         self.writeU64(seq);
         self.writeU8(worker_id);
         self.writeU32(frames_len);
@@ -197,7 +197,7 @@ pub const VmTrace = struct {
     }
 
     fn writeBinaryForce(self: *VmTrace, seq: u64, kind: EventKind, worker_id: u8, thunk_id: ObjectId, ok: bool) void {
-        self.writeU8(@intFromEnum(kind));
+        self.writeU8(@backingInt(kind));
         self.writeU64(seq);
         self.writeU8(worker_id);
         self.writeU32(thunk_id);

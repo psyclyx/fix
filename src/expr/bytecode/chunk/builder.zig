@@ -147,7 +147,7 @@ pub const ChunkBuilder = struct {
     /// Write a single opcode byte.
     pub fn writeOp(self: *ChunkBuilder, allocator: std.mem.Allocator, op: OpCode) !void {
         self.last_op_offset = self.code.items.len;
-        try self.code.append(allocator, @intFromEnum(op));
+        try self.code.append(allocator, @backingInt(op));
     }
 
     /// Write a single byte operand.
@@ -267,20 +267,20 @@ pub fn classifyTrivialBody(code: []const u8, constants: []const Value, local_cou
     // assumes the chunk is a thunk body, not a lambda body.
     if (local_count != 0) return .none;
     if (code.len < 2) return .none;
-    const first: OpCode = @enumFromInt(code[0]);
+    const first: OpCode = @fromBackingInt(@intCast(code[0]));
     switch (first) {
         // `up_get_ret upvalue[N]; halt`
         // Layout: 1 byte op, 2 bytes upvalue idx, 1 byte halt.
         .up_get_ret => {
             if (code.len != 4) return .none;
-            if (@as(OpCode, @enumFromInt(code[3])) != .halt) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[3]))) != .halt) return .none;
             const idx = readU16Inline(code, 1);
             return .{ .identity_upvalue = idx };
         },
         // `push_const_ret #idx; halt` — 1 byte op, 2 bytes idx, 1 byte halt.
         .push_const_ret => {
             if (code.len != 4) return .none;
-            if (@as(OpCode, @enumFromInt(code[3])) != .halt) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[3]))) != .halt) return .none;
             const idx = readU16Inline(code, 1);
             if (idx >= constants.len) return .none;
             return .{ .literal = constants[idx] };
@@ -288,8 +288,8 @@ pub fn classifyTrivialBody(code: []const u8, constants: []const Value, local_cou
         // `up_get_attr U N; ret; halt` — 1 + 2 + 2 + 1 + 1 = 7 bytes.
         .up_get_attr => {
             if (code.len != 7) return .none;
-            if (@as(OpCode, @enumFromInt(code[5])) != .ret) return .none;
-            if (@as(OpCode, @enumFromInt(code[6])) != .halt) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[5]))) != .ret) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[6]))) != .halt) return .none;
             return .{ .attr_access = .{
                 .upvalue_index = readU16Inline(code, 1),
                 .name = readU16Inline(code, 3),
@@ -298,8 +298,8 @@ pub fn classifyTrivialBody(code: []const u8, constants: []const Value, local_cou
         // `push_builtins; ret; halt` — 1 + 1 + 1 = 3 bytes.
         .push_builtins => {
             if (code.len != 3) return .none;
-            if (@as(OpCode, @enumFromInt(code[1])) != .ret) return .none;
-            if (@as(OpCode, @enumFromInt(code[2])) != .halt) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[1]))) != .ret) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[2]))) != .halt) return .none;
             return .builtins;
         },
         // `push_null|push_true|push_false; ret; halt` — 3 bytes.
@@ -310,8 +310,8 @@ pub fn classifyTrivialBody(code: []const u8, constants: []const Value, local_cou
         // returns the literal.
         .push_null, .push_true, .push_false => {
             if (code.len != 3) return .none;
-            if (@as(OpCode, @enumFromInt(code[1])) != .ret) return .none;
-            if (@as(OpCode, @enumFromInt(code[2])) != .halt) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[1]))) != .ret) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[2]))) != .halt) return .none;
             const literal: Value = switch (first) {
                 .push_null => Value.null_val,
                 .push_true => Value.boolVal(true),
@@ -323,8 +323,8 @@ pub fn classifyTrivialBody(code: []const u8, constants: []const Value, local_cou
         // `closure CL, 0; ret; halt` — 1 op + 2 chunk_id + 2 upvalue_count + 1 ret + 1 halt = 7 bytes.
         .closure => {
             if (code.len != 7) return .none;
-            if (@as(OpCode, @enumFromInt(code[5])) != .ret) return .none;
-            if (@as(OpCode, @enumFromInt(code[6])) != .halt) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[5]))) != .ret) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[6]))) != .halt) return .none;
             const upvalue_count = readU16Inline(code, 3);
             if (upvalue_count != 0) return .none; // non-zero closure needs stack values
             return .{ .closure_zero = readU16Inline(code, 1) };
@@ -332,8 +332,8 @@ pub fn classifyTrivialBody(code: []const u8, constants: []const Value, local_cou
         // `closure_w CL(4), 0; ret; halt` — 1 + 4 + 2 + 1 + 1 = 9 bytes.
         .closure_w => {
             if (code.len != 9) return .none;
-            if (@as(OpCode, @enumFromInt(code[7])) != .ret) return .none;
-            if (@as(OpCode, @enumFromInt(code[8])) != .halt) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[7]))) != .ret) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[8]))) != .halt) return .none;
             const upvalue_count = readU16Inline(code, 5);
             if (upvalue_count != 0) return .none;
             return .{ .closure_zero = readU32Inline(code, 1) };
@@ -346,8 +346,8 @@ pub fn classifyTrivialBody(code: []const u8, constants: []const Value, local_cou
             if (k == 0) return .none; // shouldn't happen — emit drops to .closure when K==0
             const desc_len: usize = @as(usize, k) * 3;
             if (code.len != 7 + desc_len) return .none;
-            if (@as(OpCode, @enumFromInt(code[5 + desc_len])) != .ret) return .none;
-            if (@as(OpCode, @enumFromInt(code[6 + desc_len])) != .halt) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[5 + desc_len]))) != .ret) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[6 + desc_len]))) != .halt) return .none;
             // Inner descriptors must all be kind=upvalue (1) since the
             // thunk body has no locals. If the compiler ever emits
             // kind=local here it would read garbage, so refusing the
@@ -370,8 +370,8 @@ pub fn classifyTrivialBody(code: []const u8, constants: []const Value, local_cou
             if (k == 0) return .none;
             const desc_len: usize = @as(usize, k) * 3;
             if (code.len != 9 + desc_len) return .none;
-            if (@as(OpCode, @enumFromInt(code[7 + desc_len])) != .ret) return .none;
-            if (@as(OpCode, @enumFromInt(code[8 + desc_len])) != .halt) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[7 + desc_len]))) != .ret) return .none;
+            if (@as(OpCode, @fromBackingInt(@intCast(code[8 + desc_len]))) != .halt) return .none;
             var i: usize = 0;
             while (i < desc_len) : (i += 3) {
                 if (code[7 + i] != 1) return .none;

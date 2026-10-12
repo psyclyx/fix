@@ -736,6 +736,36 @@ test "static attr positions survive a dynamic entry in the same literal" {
     try std.testing.expect(std.mem.indexOf(u8, merged, "line = 1") != null);
 }
 
+test "unsafeGetAttrPos reports dynamic keys at the start of their attribute path" {
+    const src =
+        "let x = \"a\"; y = \"b\"; in [\n" ++
+        "  (builtins.unsafeGetAttrPos \"a\" { ${x} = 1; })\n" ++
+        "  (builtins.unsafeGetAttrPos \"a\" { \"${x}\" = 1; })\n" ++
+        "  (builtins.unsafeGetAttrPos \"b\" { foo.${x}.${y} = 1; }.foo.a)\n" ++
+        "  (builtins.unsafeGetAttrPos \"a\" (rec { ${x} = 1; }))\n" ++
+        "]";
+    const out = try helpers.renderPathForTest(src, "/test/dyn.nix");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings(
+        "[ { column = 36; file = \"/test/dyn.nix\"; line = 2; } " ++
+            "{ column = 36; file = \"/test/dyn.nix\"; line = 3; } " ++
+            "{ column = 36; file = \"/test/dyn.nix\"; line = 4; } " ++
+            "{ column = 41; file = \"/test/dyn.nix\"; line = 5; } ]",
+        out,
+    );
+}
+
+test "unsafeGetAttrPos reports a let attribute path at its first segment" {
+    const src =
+        "let\n" ++
+        "  a = { };\n" ++
+        "  a.foo = 1;\n" ++
+        "in builtins.unsafeGetAttrPos \"foo\" a";
+    const out = try helpers.renderPathForTest(src, "/test/let.nix");
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("{ column = 3; file = \"/test/let.nix\"; line = 3; }", out);
+}
+
 test "unsafeGetAttrPos reads positions from the attrs_new_named_pos_srt side table" {
     // Multi-entry runtime-built attrset (non-constant values defeat the
     // closed-literal fold): the names AND positions ride the chunk's

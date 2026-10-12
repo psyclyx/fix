@@ -329,7 +329,7 @@ const Tui = struct {
 
     fn initializeSession(self: *Tui, host: SessionHost) !void {
         const focused = host.focusedChunk();
-        if (host.start_heap) self.tree.categories[@intFromEnum(Category.heap)] = true;
+        if (host.start_heap) self.tree.categories[@backingInt(Category.heap)] = true;
         const initial: Visit.Kind = if (host.start_heap)
             .{ .heap = .overview }
         else if (focused) |id|
@@ -396,7 +396,7 @@ const Tui = struct {
             self.heap_index.objects_failed = objects_failed;
             if (Tui.Ops.view_state.currentObject(self) != null) try Tui.Ops.pages.refreshPage(self, Tui.Ops.view_state.currentKind(self));
         }
-        const wants_objects = Tui.Ops.view_state.currentObject(self) != null or self.tree.heap_views[@intFromEnum(HeapView.objects)];
+        const wants_objects = Tui.Ops.view_state.currentObject(self) != null or self.tree.heap_views[@backingInt(HeapView.objects)];
         if (wants_objects and objects_failed) self.status_msg = "(object index failed)";
         if (wants_objects and self.heap_index.objects == null and jobs.objects.thread == null and !objects_failed) {
             jobs.objects.start() catch {
@@ -477,7 +477,7 @@ const Tui = struct {
             projection.view == .objects
         else
             false;
-        if (!self.tree.heap_views[@intFromEnum(HeapView.objects)] and !projects_objects) return;
+        if (!self.tree.heap_views[@backingInt(HeapView.objects)] and !projects_objects) return;
         self.heap_index.objects = self.ev.heapObjectSnapshot(self.allocator) catch {
             self.heap_index.objects_failed = true;
             return;

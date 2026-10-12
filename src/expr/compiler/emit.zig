@@ -74,6 +74,20 @@ pub fn emitBuildAttrsSorted(self: *Compiler, count: u16, names: []const types.In
     try self.builder.writeU32(self.allocator, pos_start);
 }
 
+/// Build one dynamic-key attrset from the `[name, value]` stack pair. With a
+/// source file, the entry keeps the position at `offset` for `unsafeGetAttrPos`.
+pub fn emitDynamicAttr(self: *Compiler, offset: u32) !void {
+    _ = self.source_path orelse return emitOpU16(self, .attrs_new, 1);
+    const position = try diagnostics.sourcePositionForOffset(self, offset);
+    const pos_index: u32 = @intCast(self.builder.attr_pos.items.len);
+    try self.builder.attr_pos.append(self.allocator, .{
+        .name = try self.intern.intern(""),
+        .pos = .{ .file = try diagnostics.sourceFileId(self), .line = position.line, .column = position.column },
+    });
+    try emitOp(self, .attrs_new_dyn_pos);
+    try self.builder.writeU32(self.allocator, pos_index);
+}
+
 fn posNameLessThan(_: void, a: heap_mod.AttrPosEntry, b: heap_mod.AttrPosEntry) bool {
     return a.name < b.name;
 }
@@ -124,7 +138,7 @@ fn fuseStoreToSlot(self: *Compiler, slot: u16, target: StoreTarget) !bool {
     const offset = self.builder.last_op_offset orelse return false;
     const code = self.builder.code.items;
     if (offset >= code.len) return false;
-    const last_op: OpCode = @enumFromInt(code[offset]);
+    const last_op: OpCode = @fromBackingInt(@intCast(code[offset]));
     const fused: OpCode = switch (last_op) {
         .thunk => switch (target) {
             .narrow_local => .thunk_st,
@@ -136,7 +150,7 @@ fn fuseStoreToSlot(self: *Compiler, slot: u16, target: StoreTarget) !bool {
         },
         else => return false,
     };
-    code[offset] = @intFromEnum(fused);
+    code[offset] = @backingInt(fused);
     try self.builder.writeByte(self.allocator, @intCast(slot));
     self.builder.last_op_offset = null;
     // Unfused: extra `loc_set` op (1 byte) + slot byte. Fused: just
@@ -170,25 +184,25 @@ pub fn emitRet(self: *Compiler) !void {
     if (self.builder.last_op_offset) |offset| {
         const code = self.builder.code.items;
         if (offset < code.len) {
-            const last_op: OpCode = @enumFromInt(code[offset]);
+            const last_op: OpCode = @fromBackingInt(@intCast(code[offset]));
             switch (last_op) {
                 .push_const => {
-                    code[offset] = @intFromEnum(OpCode.push_const_ret);
+                    code[offset] = @backingInt(OpCode.push_const_ret);
                     self.builder.last_op_offset = null;
                     return;
                 },
                 .up_get => {
-                    code[offset] = @intFromEnum(OpCode.up_get_ret);
+                    code[offset] = @backingInt(OpCode.up_get_ret);
                     self.builder.last_op_offset = null;
                     return;
                 },
                 .loc_get => {
-                    code[offset] = @intFromEnum(OpCode.loc_get_ret);
+                    code[offset] = @backingInt(OpCode.loc_get_ret);
                     self.builder.last_op_offset = null;
                     return;
                 },
                 .loc_get_w => {
-                    code[offset] = @intFromEnum(OpCode.loc_get_ret_w);
+                    code[offset] = @backingInt(OpCode.loc_get_ret_w);
                     self.builder.last_op_offset = null;
                     return;
                 },
@@ -217,7 +231,7 @@ pub fn emitGetAttr(self: *Compiler, id: InternId) !void {
         if (self.builder.last_op_offset) |offset| {
             const code = self.builder.code.items;
             if (offset < code.len) {
-                const last_op: OpCode = @enumFromInt(code[offset]);
+                const last_op: OpCode = @fromBackingInt(@intCast(code[offset]));
                 const fused: ?OpCode = switch (last_op) {
                     .up_get => .up_get_attr,
                     .loc_get => .loc_get_attr,
@@ -225,7 +239,7 @@ pub fn emitGetAttr(self: *Compiler, id: InternId) !void {
                     else => null,
                 };
                 if (fused) |op| {
-                    code[offset] = @intFromEnum(op);
+                    code[offset] = @backingInt(op);
                     try self.builder.writeU16(self.allocator, @intCast(id));
                     self.builder.last_op_offset = null;
                     // The unfused encoding would have been 3 bytes

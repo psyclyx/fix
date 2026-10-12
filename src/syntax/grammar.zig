@@ -26,13 +26,13 @@ const TokenType = tok.TokenType;
 // follows: `neg`, a precedence-only marker for unary minus (never present in
 // the token stream).
 
-pub const num_tokens = @typeInfo(TokenType).@"enum".fields.len;
+pub const num_tokens = @typeInfo(TokenType).@"enum".field_names.len;
 pub const t_neg: u32 = num_tokens;
 pub const num_terminals: u32 = num_tokens + 1;
-pub const t_eof: u32 = @intFromEnum(TokenType.eof);
+pub const t_eof: u32 = @backingInt(TokenType.eof);
 
 inline fn t(tt: TokenType) u32 {
-    return @intFromEnum(tt);
+    return @backingInt(tt);
 }
 
 // ---- nonterminals ----------------------------------------------------------
@@ -58,7 +58,7 @@ pub const Nonterminal = enum(u32) {
 };
 
 inline fn n(x: Nonterminal) u32 {
-    return num_terminals + @intFromEnum(x);
+    return num_terminals + @backingInt(x);
 }
 
 // ---- semantic action tags --------------------------------------------------
@@ -324,7 +324,7 @@ const prec = [_]lr.RawPrec{
 // paid once by the cached codegen step (see gen_parser_tables.zig), not on
 // every build — so it is free at the point of use.
 
-const num_nt = @typeInfo(Nonterminal).@"enum".fields.len;
+const num_nt = @typeInfo(Nonterminal).@"enum".field_names.len;
 
 /// Eliminate runtime chain reductions by expanding unit productions at
 /// comptime. This increases generated table size and generation work.
@@ -337,10 +337,10 @@ fn isUnitPass(p: Production) bool {
 const expanded: []const Production = if (!eliminate_units) &productions else blk: {
     @setEvalBranchQuota(10_000_000);
     // reach[a][b]: nonterminal a derives b through a chain of unit rules.
-    var reach = [_][num_nt]bool{[_]bool{false} ** num_nt} ** num_nt;
+    var reach: [num_nt][num_nt]bool = @splat(@splat(false));
     for (0..num_nt) |a| reach[a][a] = true;
     for (productions) |p| {
-        if (isUnitPass(p)) reach[@intFromEnum(p.lhs)][p.rhs[0] - num_terminals] = true;
+        if (isUnitPass(p)) reach[@backingInt(p.lhs)][p.rhs[0] - num_terminals] = true;
     }
     var changed = true;
     while (changed) {
@@ -356,9 +356,9 @@ const expanded: []const Production = if (!eliminate_units) &productions else blk
     var out: []const Production = &.{};
     for (productions) |q| {
         if (isUnitPass(q)) continue; // drop the unit rules themselves
-        const b = @intFromEnum(q.lhs);
+        const b = @backingInt(q.lhs);
         for (0..num_nt) |a| {
-            if (reach[a][b]) out = out ++ &[_]Production{.{ .lhs = @enumFromInt(a), .rhs = q.rhs, .act = q.act, .prec = q.prec }};
+            if (reach[a][b]) out = out ++ &[_]Production{.{ .lhs = @fromBackingInt(@intCast(a)), .rhs = q.rhs, .act = q.act, .prec = q.prec }};
         }
     }
     break :blk out;
@@ -366,7 +366,7 @@ const expanded: []const Production = if (!eliminate_units) &productions else blk
 
 const raw_productions = blk: {
     var r: [expanded.len]lr.RawProd = undefined;
-    for (expanded, 0..) |p, i| r[i] = .{ .lhs = @intFromEnum(p.lhs), .rhs = p.rhs, .prec = p.prec };
+    for (expanded, 0..) |p, i| r[i] = .{ .lhs = @backingInt(p.lhs), .rhs = p.rhs, .prec = p.prec };
     break :blk r;
 };
 
@@ -376,9 +376,9 @@ const raw_productions = blk: {
 /// the `syntax` module compiles — the parser imports the generated `.zig`.
 pub const desc = lr.GrammarDesc{
     .num_terminals = num_terminals,
-    .num_nonterminals = @typeInfo(Nonterminal).@"enum".fields.len,
+    .num_nonterminals = @typeInfo(Nonterminal).@"enum".field_names.len,
     .eof = t_eof,
-    .start = @intFromEnum(Nonterminal.expr),
+    .start = @backingInt(Nonterminal.expr),
     .productions = &raw_productions,
     .precedence = &prec,
 };

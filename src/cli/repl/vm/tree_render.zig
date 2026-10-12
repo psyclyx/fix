@@ -323,7 +323,7 @@ pub fn Methods(comptime Explorer: type) type {
             const selected = index == self.navigation.tree_selection;
             const line: []const u8 = switch (self.tree.rows.items[index]) {
                 .category => |entry| blk: {
-                    const is_open = self.tree.categories[@intFromEnum(entry.kind)];
+                    const is_open = self.tree.categories[@backingInt(entry.kind)];
                     const projected = !is_open and switch (entry.kind) {
                         .bytecode => Explorer.Ops.view_state.currentChunk(self) != null,
                         .heap => Explorer.Ops.view_state.currentObject(self) != null,
@@ -460,7 +460,7 @@ pub fn Methods(comptime Explorer: type) type {
                         (if (Explorer.Ops.view_state.currentStoreRecord(self)) |r| r.view == entry.view else false);
                     const marker = if (entry.view == .overview)
                         "·"
-                    else if (self.tree.heap_views[@intFromEnum(entry.view)])
+                    else if (self.tree.heap_views[@backingInt(entry.view)])
                         "▾"
                     else if (projected)
                         "›"

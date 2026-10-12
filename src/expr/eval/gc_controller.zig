@@ -516,13 +516,13 @@ pub fn markRoots(ev: Context, tr: *gc.Tracer) void {
     var it = ev.imports.entries.iterator();
     while (it.next()) |e| {
         const entry = e.value_ptr.*;
-        if (@intFromEnum(entry.future.stateField(.monotonic)) == @intFromEnum(future_mod.FutureState.resolved))
+        if (@backingInt(entry.future.stateField(.monotonic)) == @backingInt(future_mod.FutureState.resolved))
             tr.markValue(ev.heap, entry.result);
     }
     var replay_it = ev.imports.replay_entries.iterator();
     while (replay_it.next()) |e| {
         const entry = e.value_ptr.*;
-        if (@intFromEnum(entry.future.stateField(.monotonic)) == @intFromEnum(future_mod.FutureState.resolved))
+        if (@backingInt(entry.future.stateField(.monotonic)) == @backingInt(future_mod.FutureState.resolved))
             tr.markValue(ev.heap, entry.result);
     }
     // Lazy-derivation cache (Value bits keyed by attrs id). Only current-

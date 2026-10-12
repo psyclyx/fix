@@ -194,7 +194,7 @@ pub const InternTable = struct {
             .allocator = allocator,
             .entries = .empty,
             .data = .empty,
-            .shards = [_]Shard{.{}} ** shard_count,
+            .shards = @splat(.{}),
             .token = next_table_token.fetchAdd(1, .monotonic),
         };
         // Pre-size each shard because growth rehashes every string key.
@@ -313,7 +313,7 @@ pub const InternTable = struct {
         var result: Stats = .{
             .entries = self.entries.count(),
             .data_bytes = self.data.count(),
-            .shard_counts = [_]u32{0} ** shard_count,
+            .shard_counts = @splat(0),
         };
         for (&self.shards, 0..) |*shard, i| {
             // Reading the shard's count is racy under concurrent intern,

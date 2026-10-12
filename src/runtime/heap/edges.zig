@@ -66,7 +66,7 @@ fn walkThunk(
         return;
     }
 
-    switch (@as(FutureState, @enumFromInt(future_mod.stateFieldRaw(raw_state)))) {
+    switch (@as(FutureState, @fromBackingInt(@intCast(future_mod.stateFieldRaw(raw_state))))) {
         .resolved => try sink.value(heap, thunk.payload.result),
         // `.errored` reuses the result bits as a heap-owned FailureRef (or an
         // inline degraded error code); `.blackhole` is terminal. Neither is a

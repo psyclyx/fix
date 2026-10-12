@@ -289,7 +289,7 @@ test "ingestSerializedNar uses the supplied digest without rehashing" {
     var realization = RealizationStore.init(testing.allocator);
     defer realization.deinit();
 
-    const digest = [_]u8{0x5a} ** std.crypto.hash.sha2.Sha256.digest_length;
+    const digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = @splat(0x5a);
     const ingested = try ingestSerializedNar(testing.allocator, &realization, "source", "borrowed NAR bytes", &digest);
     defer ingested.deinit(testing.allocator);
 

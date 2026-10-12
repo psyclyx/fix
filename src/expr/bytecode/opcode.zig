@@ -108,6 +108,10 @@ pub const OpCode = enum(u8) {
     /// `attrs_new_named_pos_srt` without the sorted-names guarantee (cache
     /// loader rewrite target, like `attrs_new_named`).
     attrs_new_named_pos,
+    /// `attrs_new` for one dynamic-key pair, with the key's source position
+    /// at `Chunk.attr_pos[pos_index]`. The table entry's name is unused.
+    /// Operand: pos_index:u32.
+    attrs_new_dyn_pos,
     /// Build a list from items on the stack.
     /// Operand: 2-byte count of items.
     list_new,
@@ -387,7 +391,7 @@ pub const OpCode = enum(u8) {
     breakpoint,
 };
 
-pub const count = @typeInfo(OpCode).@"enum".fields.len;
+pub const count = @typeInfo(OpCode).@"enum".field_names.len;
 
 const std = @import("std");
 
@@ -492,6 +496,7 @@ pub fn layout(op: OpCode) []const Operand {
         .attrs_new, .attrs_new_srt => comptime &[_]Operand{cnt(.b2, "entries")},
         .attrs_new_named_srt, .attrs_new_named => comptime &[_]Operand{ cnt(.b2, "entries (named)"), .{ .skip = .b4 } },
         .attrs_new_named_pos_srt, .attrs_new_named_pos => comptime &[_]Operand{ cnt(.b2, "entries (named)"), .{ .skip = .b4 }, cnt(.b2, "positions"), .{ .skip = .b4 } },
+        .attrs_new_dyn_pos => comptime &[_]Operand{.{ .skip = .b4 }},
         .list_new => comptime &[_]Operand{cnt(.b2, "items")},
         .list_cat_n => comptime &[_]Operand{cnt(.b2, "lists")},
         .str_cat, .path_cat => comptime &[_]Operand{cnt(.b2, "parts")},
@@ -665,7 +670,7 @@ pub const InstructionCursor = struct {
         if (self.ip == self.code.len) return null;
         if (self.code[self.ip] >= count) return error.MalformedInstruction;
         const start = self.ip;
-        const op: OpCode = @enumFromInt(self.code[start]);
+        const op: OpCode = @fromBackingInt(@intCast(self.code[start]));
         var off = start + 1;
         for (layout(op)) |f| off = try checkedEnd(off, try checkedFieldLen(f, self.code, off), self.code.len);
         self.ip = off;
@@ -683,14 +688,14 @@ pub fn operandLen(op: OpCode, code: []const u8, ip: usize) usize {
 }
 
 test "opcode byte values round-trip through enumFromInt" {
-    inline for (@typeInfo(OpCode).@"enum".fields) |field| {
-        const op: OpCode = @enumFromInt(field.value);
-        try std.testing.expectEqual(@as(u8, field.value), @intFromEnum(op));
+    inline for (@typeInfo(OpCode).@"enum".field_values) |field_value| {
+        const op: OpCode = @fromBackingInt(@intCast(field_value));
+        try std.testing.expectEqual(@as(u8, field_value), @backingInt(op));
     }
 }
 
 test "opcode count matches the number of declared variants" {
-    try std.testing.expectEqual(@typeInfo(OpCode).@"enum".fields.len, count);
+    try std.testing.expectEqual(@typeInfo(OpCode).@"enum".field_names.len, count);
     // Sanity bound: the opcode set is small and fits comfortably in a u8,
     // which the bytecode encoding relies on.
     try std.testing.expect(count > 0);
@@ -700,8 +705,8 @@ test "opcode count matches the number of declared variants" {
 test "opcode tag names are unique" {
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(std.testing.allocator);
-    inline for (@typeInfo(OpCode).@"enum".fields) |field| {
-        const result = try seen.getOrPut(std.testing.allocator, field.name);
+    inline for (@typeInfo(OpCode).@"enum".field_names) |field_name| {
+        const result = try seen.getOrPut(std.testing.allocator, field_name);
         try std.testing.expect(!result.found_existing);
     }
 }
