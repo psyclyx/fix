@@ -14,6 +14,65 @@ const appendStringAttr = arguments.appendStringAttr;
 const optionalStringAttr = arguments.optionalStringAttr;
 const requiredStringAttr = arguments.requiredStringAttr;
 
+/// The root of a git work tree: a `.git` entry, either a directory in a
+/// normal checkout or a file in a linked work tree / submodule.
+fn isWorkTreeRoot(self: *VM, path: []const u8) bool {
+    const dot_git = std.fs.path.join(self.allocator, &.{ path, ".git" }) catch return false;
+    defer self.allocator.free(dot_git);
+    return self.files.pathExists(dot_git) catch false;
+}
+
+/// A work tree whose `HEAD` already resolves to a revision. `git init` leaves
+/// `HEAD` symbolic (`ref: refs/heads/main`) with no ref behind it: the git
+/// transport has nothing to fetch there (`FetchGitRevisionNotFound`), while the
+/// plain directory copy worked. Any HEAD this check cannot *prove* resolvable —
+/// unborn, empty, garbage, missing, or an unreadable `.git` — keeps the path
+/// behaviour, so a broken repository degrades to the old directory copy instead
+/// of failing the fetch. A `.git` *file* (linked work tree, submodule) names its
+/// own gitdir and stays on the git path, as before; `.git` as a symlink is read
+/// through, so a symlinked unborn checkout is caught too.
+fn hasResolvedHead(self: *VM, path: []const u8) bool {
+    const git_dir = std.fs.path.join(self.allocator, &.{ path, ".git" }) catch return false;
+    defer self.allocator.free(git_dir);
+    switch (self.files.fileType(git_dir) catch return false) {
+        .directory, .symlink => {},
+        // A `.git` file (linked work tree, submodule) points at its own gitdir.
+        .regular => return true,
+        else => return false,
+    }
+
+    const head_path = std.fs.path.join(self.allocator, &.{ git_dir, "HEAD" }) catch return false;
+    defer self.allocator.free(head_path);
+    const head_raw = self.files.readFile(head_path) catch return false;
+    const head = std.mem.trimEnd(u8, head_raw, " \t\r\n");
+    if (head.len == 0) return false;
+
+    if (std.mem.startsWith(u8, head, "ref: ")) {
+        const ref = std.mem.trim(u8, head["ref: ".len..], " \t\r\n");
+        if (ref.len == 0) return false;
+
+        const loose = std.fs.path.join(self.allocator, &.{ git_dir, ref }) catch return false;
+        defer self.allocator.free(loose);
+        if (self.files.pathExists(loose) catch false) return true;
+
+        const packed_path = std.fs.path.join(self.allocator, &.{ git_dir, "packed-refs" }) catch return false;
+        defer self.allocator.free(packed_path);
+        const packed_refs = self.files.readFile(packed_path) catch return false;
+        var lines = std.mem.splitScalar(u8, packed_refs, '\n');
+        while (lines.next()) |line| {
+            const entry = std.mem.trim(u8, line, " \t\r");
+            if (entry.len == 0 or entry[0] == '#' or entry[0] == '^') continue;
+            const space = std.mem.indexOfScalar(u8, entry, ' ') orelse continue;
+            if (std.mem.eql(u8, std.mem.trim(u8, entry[space + 1 ..], " \t\r"), ref)) return true;
+        }
+        return false; // unborn: nothing to fetch yet
+    }
+
+    // Detached HEAD: only a full revision id proves the object exists. Anything
+    // else (empty, garbage) is treated as unresolvable on purpose.
+    return looksLikeGitRev(head);
+}
+
 /// A 40-char lowercase-hex git revision (as opposed to a branch/tag `ref`).
 fn looksLikeGitRev(text: []const u8) bool {
     if (text.len != 40) return false;
@@ -90,6 +149,25 @@ pub fn parse(self: *VM, arg: Value) !Value {
         return Value.attrs(try self.heap.addAttrs(entries.items));
     }
     if (std.fs.path.isAbsolute(base)) {
+        // Nix resolves a bare path that is a git work tree as `git+file`, so
+        // the flake sees the work tree's tracked snapshot — uncommitted
+        // tracked edits included, `.git` and untracked files excluded — and
+        // not the raw directory. Mirror that whenever the tree is written to
+        // the store (`instantiate`/`build`/`switch`): a raw-directory copy
+        // pulls repository junk (build outputs, caches, `.git`) into the
+        // store and can trip the file-size guard on large untracked blobs.
+        // Plain `eval` keeps evaluating the local directory in place, where
+        // relative imports already resolve without a store round trip.
+        // Explicit `path:` refs stay `path` in both modes (Nix copies those
+        // verbatim), as does a path that is not a work-tree root.
+        if (self.realization.storeWritesEnabled() and isWorkTreeRoot(self, base) and hasResolvedHead(self, base)) {
+            const url = try std.fmt.allocPrint(self.allocator, "file://{s}", .{base});
+            defer self.allocator.free(url);
+            try appendStringAttr(self, &entries, "type", "git");
+            try appendStringAttr(self, &entries, "url", url);
+            try appendQueryAttrs(self, &entries, query);
+            return Value.attrs(try self.heap.addAttrs(entries.items));
+        }
         try appendStringAttr(self, &entries, "type", "path");
         try appendStringAttr(self, &entries, "path", base);
         try appendQueryAttrs(self, &entries, query);
