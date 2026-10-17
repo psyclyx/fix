@@ -422,7 +422,7 @@ pub fn arity(id: BuiltinId) u8 {
     };
 }
 
-pub fn buildAttrSet(intern: *InternTable, heap: *ObjectHeap, nix_path: []const NixPathEntry, store_dir: []const u8) !Value {
+pub fn buildAttrSet(intern: *InternTable, heap: *ObjectHeap, nix_path: []const NixPathEntry, store_dir: []const u8, pure_eval: bool) !Value {
     var entries: std.ArrayListUnmanaged(AttrEntry) = .empty;
     defer entries.deinit(heap.allocator);
     try entries.ensureTotalCapacity(heap.allocator, public_builtin_count + constant_bindings.len + 1);
@@ -442,17 +442,22 @@ pub fn buildAttrSet(intern: *InternTable, heap: *ObjectHeap, nix_path: []const N
         .name = try intern.intern("storeDir"),
         .value = Value.string(try intern.intern(store_dir)),
     });
-    // `currentSystem` / `currentTime` are impure: wrapped in a force-time guard
-    // that raises `RestrictedInPureEval` under pure eval (a flake must take
-    // `system` explicitly), and otherwise resolves to the constant.
-    entries.appendAssumeCapacity(.{
-        .name = try intern.intern("currentSystem"),
-        .value = try pureGuardedThunk(heap, Value.string(try intern.intern(hostSystemName()))),
-    });
-    entries.appendAssumeCapacity(.{
-        .name = try intern.intern("currentTime"),
-        .value = try pureGuardedThunk(heap, Value.int(0)),
-    });
+    // `currentSystem` / `currentTime` are impure: Nix omits them from
+    // `builtins` in pure eval, so `builtins ? currentSystem` is false and
+    // flake-compat guards (`!builtins ? currentSystem || …`) take the
+    // explicit-`system` branch instead of tripping the guard. Impure eval
+    // keeps the force-time wrapper, which still reports the pure-eval
+    // diagnostic if such a value ever crosses into a pure policy.
+    if (!pure_eval) {
+        entries.appendAssumeCapacity(.{
+            .name = try intern.intern("currentSystem"),
+            .value = try pureGuardedThunk(heap, Value.string(try intern.intern(hostSystemName()))),
+        });
+        entries.appendAssumeCapacity(.{
+            .name = try intern.intern("currentTime"),
+            .value = try pureGuardedThunk(heap, Value.int(0)),
+        });
+    }
     entries.appendAssumeCapacity(.{
         .name = try intern.intern("nixVersion"),
         .value = Value.string(try intern.intern(nix_compat_version)),

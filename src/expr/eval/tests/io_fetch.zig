@@ -1119,9 +1119,14 @@ test "pure evaluation sandboxes env, out-of-tree reads, search paths, and unlock
     try std.testing.expectEqualStrings("INSIDE", ev.intern.get(in_val.asInternId()));
     try std.testing.expectError(error.RestrictedInPureEval, ev.evaluate("builtins.readFile \"/etc/hostname\""));
 
-    // currentSystem / currentTime are unavailable in pure eval.
-    try std.testing.expectError(error.RestrictedInPureEval, ev.evaluate("builtins.currentSystem"));
-    try std.testing.expectError(error.RestrictedInPureEval, ev.evaluate("builtins.currentTime"));
+    // currentSystem / currentTime are absent from `builtins` in pure eval
+    // (Nix parity): the attrset probe is false — so flake-compat guards
+    // (`!builtins ? currentSystem || …`) take the explicit-`system` branch —
+    // and a direct access fails as a missing attribute.
+    const has_current = try ev.evaluate("builtins ? currentSystem");
+    try std.testing.expect(!has_current.asBool());
+    try std.testing.expectError(error.MissingAttribute, ev.evaluate("builtins.currentSystem"));
+    try std.testing.expectError(error.MissingAttribute, ev.evaluate("builtins.currentTime"));
 
     // Search-path lookups and unlocked fetches are forbidden — but the
     // synthetic corepkgs `<nix/fetchurl.nix>` stays importable (it resolves to
@@ -1140,6 +1145,28 @@ test "pure evaluation sandboxes env, out-of-tree reads, search paths, and unlock
     if (ev.evaluate("builtins.readFile \"/no/such/file/here\"")) |_| {} else |err| {
         try std.testing.expect(err != error.RestrictedInPureEval);
     }
+}
+
+test "setPureEval rebuilds the builtins attrset" {
+    // The attrset can be built before the policy settles (the CLI resolves
+    // flake refs first), so flipping purity must rebuild it — otherwise the
+    // pure-only omission of currentSystem/currentTime never takes effect and
+    // `builtins ? currentSystem` stays true in pure eval.
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    ev.setFileIo(std.testing.io);
+
+    const impure_has = try ev.evaluate("builtins ? currentSystem");
+    try std.testing.expect(impure_has.asBool());
+
+    try ev.setPureEval(true, &.{});
+    const pure_has = try ev.evaluate("builtins ? currentSystem");
+    try std.testing.expect(!pure_has.asBool());
+    try std.testing.expectError(error.MissingAttribute, ev.evaluate("builtins.currentSystem"));
+
+    try ev.setPureEval(false, &.{});
+    const back = try ev.evaluate("builtins ? currentSystem");
+    try std.testing.expect(back.asBool());
 }
 
 test "flake builtins are gated on the flakes experimental feature" {

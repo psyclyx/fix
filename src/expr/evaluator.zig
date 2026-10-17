@@ -848,6 +848,14 @@ pub const Engine = struct {
         self.pure_eval_roots = replacement;
         self.policy.pure_eval = pure;
         self.policy.allowed_path_roots = self.pure_eval_roots;
+        // `builtins` is purity-sensitive: pure eval omits `currentSystem` /
+        // `currentTime` (Nix parity, so `builtins ? currentSystem` is false).
+        // The attrset may already exist — the CLI resolves flake refs before
+        // it settles the policy — so drop the cache and let the next
+        // `ensureBuiltins` rebuild it against the final policy. Bootstrap
+        // objects stay pinned for the eval's lifetime, so the stale attrset
+        // cannot be collected while an old reference is still live.
+        self.builtins_value = null;
     }
 
     pub fn languagePolicy(self: *const Engine) LanguagePolicy {
@@ -3300,7 +3308,7 @@ pub const Engine = struct {
         try self.heap.ensureEmptySingletons();
         const nix_path = try self.sources.search_paths.toNixPath(self.allocator);
         defer self.allocator.free(nix_path);
-        const value = try builtins.buildAttrSet(&self.intern, &self.heap, nix_path, self.store.realization.store_dir);
+        const value = try builtins.buildAttrSet(&self.intern, &self.heap, nix_path, self.store.realization.store_dir, self.policy.pure_eval);
         self.builtins_value = value;
         return value;
     }
