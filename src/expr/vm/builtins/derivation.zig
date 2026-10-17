@@ -797,16 +797,41 @@ fn appendStructuredJsonStringValue(
 }
 
 fn appendJsonString(self: *VM, out: *std.ArrayListUnmanaged(u8), text: []const u8) !void {
-    try out.append(self.allocator, '"');
+    try appendEscapedJsonString(self.allocator, out, text);
+}
+
+/// Append `text` as a JSON string literal.
+///
+/// Every byte below 0x20 is escaped: JSON forbids raw control characters, and
+/// `__json` is parsed by the daemon with a strict reader — a single ESC (from
+/// a coloured shell snippet, say) otherwise fails the whole derivation with
+/// `invalid string: control character U+001B must be escaped`.
+fn appendEscapedJsonString(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), text: []const u8) !void {
+    try out.append(allocator, '"');
     for (text) |char| switch (char) {
-        '"' => try out.appendSlice(self.allocator, "\\\""),
-        '\\' => try out.appendSlice(self.allocator, "\\\\"),
-        '\n' => try out.appendSlice(self.allocator, "\\n"),
-        '\r' => try out.appendSlice(self.allocator, "\\r"),
-        '\t' => try out.appendSlice(self.allocator, "\\t"),
-        else => try out.append(self.allocator, char),
+        '"' => try out.appendSlice(allocator, "\\\""),
+        '\\' => try out.appendSlice(allocator, "\\\\"),
+        '\n' => try out.appendSlice(allocator, "\\n"),
+        '\r' => try out.appendSlice(allocator, "\\r"),
+        '\t' => try out.appendSlice(allocator, "\\t"),
+        '\x08' => try out.appendSlice(allocator, "\\b"),
+        '\x0C' => try out.appendSlice(allocator, "\\f"),
+        0x00...0x07, 0x0B, 0x0E...0x1F => {
+            var escape: [6]u8 = undefined;
+            const rendered = std.fmt.bufPrint(&escape, "\\u{x:0>4}", .{char}) catch unreachable;
+            try out.appendSlice(allocator, rendered);
+        },
+        else => try out.append(allocator, char),
     };
-    try out.append(self.allocator, '"');
+    try out.append(allocator, '"');
+}
+
+test "structured-attrs JSON escapes every control character" {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try appendEscapedJsonString(std.testing.allocator, &out, "a\x1bb\x08c\x0cd\"e\\f");
+    try std.testing.expectEqualStrings("\"a\\u001bb\\bc\\fd\\\"e\\\\f\"", out.items);
+    try std.testing.expect(try std.json.validate(std.testing.allocator, out.items));
 }
 
 fn appendJsonFmt(self: *VM, out: *std.ArrayListUnmanaged(u8), comptime fmt: []const u8, args: anytype) !void {
