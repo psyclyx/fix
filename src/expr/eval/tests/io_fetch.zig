@@ -1123,10 +1123,13 @@ test "pure evaluation sandboxes env, out-of-tree reads, search paths, and unlock
     try std.testing.expectError(error.RestrictedInPureEval, ev.evaluate("builtins.currentSystem"));
     try std.testing.expectError(error.RestrictedInPureEval, ev.evaluate("builtins.currentTime"));
 
-    // Search-path lookups and unlocked fetches are forbidden — but the
-    // synthetic corepkgs `<nix/fetchurl.nix>` stays importable (it resolves to
-    // embedded source, not a search-path entry or an on-disk read).
-    try std.testing.expectError(error.RestrictedInPureEval, ev.evaluate("builtins.findFile builtins.nixPath \"nixpkgs\""));
+    // Search-path lookups fail as a catchable "not found" — pure eval exposes an
+    // empty `builtins.nixPath` (see the dedicated test below) — while unlocked
+    // fetches stay forbidden. The synthetic corepkgs `<nix/fetchurl.nix>` stays
+    // importable: it resolves to embedded source, not to a search-path entry or
+    // an on-disk read.
+    const lookup = try ev.evaluate("(builtins.tryEval (builtins.findFile builtins.nixPath \"nixpkgs\")).success");
+    try std.testing.expect(!lookup.asBool());
     const fetchurl_fn = try ev.evaluate("builtins.isFunction (import <nix/fetchurl.nix>)");
     try std.testing.expect(fetchurl_fn.asBool());
     try std.testing.expectError(
@@ -1499,4 +1502,46 @@ test "finishEvaluation releases retained flat recipe payload" {
         ev.finishEvaluation();
         try std.testing.expectEqual(@as(usize, 1), tracking.freeCount());
     } else return error.MissingRecipeRegistryApi;
+}
+
+test "pure evaluation exposes no search path and probes answer false" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const cwd = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
+    defer std.testing.allocator.free(cwd);
+    const dir = try std.fs.path.resolve(std.testing.allocator, &.{ cwd, ".zig-cache", "tmp", &tmp.sub_path });
+    defer std.testing.allocator.free(dir);
+
+    var ev = try Engine.init(std.testing.allocator, .{ .worker_count = 0 });
+    defer ev.deinit();
+    ev.setFileIo(std.testing.io);
+    ev.policy.flakes_enabled = true;
+    try ev.setPureEval(true, &.{dir});
+
+    // Nix exposes no search path in pure mode: `builtins.nixPath` is empty and a
+    // lookup fails as a catchable "not found". nixpkgs' `impure-overlays.nix`
+    // probes `<nixpkgs-overlays>` under `tryEval`, so an uncatchable gate there
+    // aborts the whole evaluation.
+    const nix_path_len = try ev.evaluate("builtins.length builtins.nixPath");
+    try std.testing.expectEqual(@as(i64, 0), nix_path_len.asInt());
+    const probed = try ev.evaluate("(builtins.tryEval (toString <nixpkgs-overlays>)).success");
+    try std.testing.expect(!probed.asBool());
+
+    // Probing a path this evaluation may not read answers false, as Nix's
+    // `pathExists` does; reading it stays an error.
+    const outside = try ev.evaluate("builtins.pathExists \"/etc/hostname\"");
+    try std.testing.expect(!outside.asBool());
+
+    // An explicit search-path list is not a loophole: its bases are read-confined,
+    // so a directory outside the allowed roots is refused instead of disclosed
+    // (Nix: "access to absolute path '/etc' is forbidden in pure evaluation mode").
+    try std.testing.expectError(
+        error.RestrictedInPureEval,
+        ev.evaluate("builtins.findFile [{ prefix = \"\"; path = \"/etc\"; }] \"hostname\""),
+    );
+
+    // The synthetic corepkgs file stays importable (embedded source, no lookup).
+    const fetchurl_fn = try ev.evaluate("builtins.isFunction (import <nix/fetchurl.nix>)");
+    try std.testing.expect(fetchurl_fn.asBool());
 }
