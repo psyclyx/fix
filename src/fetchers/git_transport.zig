@@ -337,7 +337,9 @@ fn copyTrackedWorktree(
                 try std.Io.Dir.cwd().createDirPath(io, parent);
                 var target_buffer: [std.fs.max_path_bytes]u8 = undefined;
                 const length = try std.Io.Dir.readLinkAbsolute(io, source, &target_buffer);
-                try std.Io.Dir.symLinkAbsolute(io, target_buffer[0..length], destination, .{});
+                // Keep the raw target (often relative). symLinkAbsolute asserts
+                // an absolute target and panics on relative ones in Debug/ReleaseSafe.
+                try std.Io.Dir.cwd().symLink(io, target_buffer[0..length], destination, .{});
             },
             .file => try std.Io.Dir.copyFileAbsolute(source, destination, io, .{ .make_path = true }),
             else => {},
@@ -421,7 +423,8 @@ fn exportTree(
                 try std.Io.Dir.cwd().createDirPath(io, parent);
                 const link_target = repo.odb.readAlloc(allocator, entry.oid, max_symlink_target_len, diag) catch |err| return mapError(err);
                 defer allocator.free(link_target);
-                try std.Io.Dir.symLinkAbsolute(io, link_target, destination, .{});
+                // Same as copyTrackedWorktree: git stores relative targets verbatim.
+                try std.Io.Dir.cwd().symLink(io, link_target, destination, .{});
             },
             .gitlink => {
                 try std.Io.Dir.cwd().createDirPath(io, destination);
@@ -1067,4 +1070,40 @@ test "an unpinned snapshot keeps dirty tracked edits and excludes untracked file
     try testing.expectError(error.FileNotFound, dir.statFile(testing.io, "untracked", .{}));
     // Repository metadata is never part of a snapshot.
     try testing.expectError(error.FileNotFound, dir.statFile(testing.io, ".git", .{}));
+}
+
+// Relative symlink targets are common in git trees (`ln -s ../a.txt sub/link`).
+// snapshotLocal used to hand them to symLinkAbsolute, which asserts absolute
+// and panics in Debug/ReleaseSafe (#50). ReleaseFast skipped the assert.
+test "snapshotLocal keeps a relative tracked symlink without panicking" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(testing.io, "source", .default_dir);
+    try tmp.dir.createDir(testing.io, "source/sub", .default_dir);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "source/a.txt", .data = "hi\n" });
+    const source = try tmp.dir.realPathFileAlloc(testing.io, "source", testing.allocator);
+    defer testing.allocator.free(source);
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    const link_path = try std.fs.path.join(testing.allocator, &.{ source, "sub", "link.txt" });
+    defer testing.allocator.free(link_path);
+    try std.Io.Dir.cwd().symLink(testing.io, "../a.txt", link_path, .{});
+
+    try createTestCommit(testing.allocator, testing.io, source, "symlink");
+
+    const dest = try std.fs.path.join(testing.allocator, &.{ root, "snapshot" });
+    defer testing.allocator.free(dest);
+    _ = try snapshotLocal(testing.allocator, testing.io, source, dest, null, false, false);
+
+    try expectSnapshotFile(testing.allocator, testing.io, dest, "a.txt", "hi\n");
+
+    var dest_dir = try std.Io.Dir.cwd().openDir(testing.io, dest, .{});
+    defer dest_dir.close(testing.io);
+    var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const target_len = try dest_dir.readLink(testing.io, "sub/link.txt", &target_buf);
+    try testing.expectEqualStrings("../a.txt", target_buf[0..target_len]);
+    // Resolves through the relative link to the copied file.
+    try expectSnapshotFile(testing.allocator, testing.io, dest, "sub/link.txt", "hi\n");
 }
