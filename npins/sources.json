@@ -11,10 +11,10 @@
       "version_upper_bound": null,
       "release_prefix": null,
       "submodules": false,
-      "version": "v3.22.2",
-      "revision": "c407745c8b9b616bebf7288697699c45794e31ac",
-      "url": "https://api.github.com/repos/DeterminateSystems/nix-src/tarball/refs/tags/v3.22.2",
-      "hash": "sha256-wmwgSBcAGJe/e+FrLwJxlghYV12F7UkIodm0j6cosYg="
+      "version": "v3.24.2",
+      "revision": "f43bee4f45c2d42e7d1f4e37908ec5c7bb0fdba1",
+      "url": "https://api.github.com/repos/DeterminateSystems/nix-src/tarball/refs/tags/v3.24.2",
+      "hash": "sha256-QY69Nw0WhXSvT2n2ldI5gt0h4ofbAVoi7EYGJGyNLl0="
     },
     "lix": {
       "type": "Git",
@@ -24,9 +24,9 @@
       },
       "branch": "main",
       "submodules": false,
-      "revision": "049cc4e1322b07173f79f67bf64ecd257afeb7d0",
+      "revision": "d435bc5e6549f92a55386c4f37908c5515206e4c",
       "url": null,
-      "hash": "sha256-3zu6v8xui15m9/YfMsRem8lugJQ0vQKdGcYqfz2uI5c="
+      "hash": "sha256-DVUPRZT7rKpGUwWb81Vriu+8dTKbNeJPQ+6bbMM4/a8="
     },
     "nixpkgs": {
       "type": "Channel",
@@ -43,9 +43,9 @@
       },
       "branch": "canon",
       "submodules": false,
-      "revision": "6e990352dd1fe25248a9b47ca61e5b90cc829faf",
+      "revision": "8c622ed162787eb886cd4926937d7c5b2547a128",
       "url": null,
-      "hash": "sha256-LOkDqGsu6oyw/AyHScLOntTzKTaQbNqagw3Wlym5Y0I="
+      "hash": "sha256-wom004aRIjp193UUAPcFzhMwhS+f7s54oZOo6hQQPzw="
     }
   },
   "version": 8
