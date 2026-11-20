@@ -3300,7 +3300,11 @@ pub const Engine = struct {
         try self.heap.ensureEmptySingletons();
         const nix_path = try self.sources.search_paths.toNixPath(self.allocator);
         defer self.allocator.free(nix_path);
-        const value = try builtins.buildAttrSet(&self.intern, &self.heap, nix_path, self.store.realization.store_dir);
+        // Pure eval exposes no search path at all (Nix parity): `builtins.nixPath`
+        // is `[]` and `<name>` lookups fail as a catchable "not found" — nixpkgs'
+        // `impure-overlays.nix` probes `<nixpkgs-overlays>` under `tryEval`.
+        const effective_nix_path: []const builtins.NixPathEntry = if (self.policy.pure_eval) &.{} else nix_path;
+        const value = try builtins.buildAttrSet(&self.intern, &self.heap, effective_nix_path, self.store.realization.store_dir);
         self.builtins_value = value;
         return value;
     }

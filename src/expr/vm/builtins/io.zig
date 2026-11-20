@@ -24,7 +24,14 @@ const stringTextInternId = strings.stringTextInternId;
 const isPlainString = strings.isPlainString;
 
 pub fn builtinPathExists(self: *VM, arg: Value) !Value {
-    const path = try demandPathArg(self, arg);
+    // A path the policy does not let this evaluation read answers `false`, not
+    // an error: Nix's `pathExists` behaves that way (its string→path coercion
+    // fails silently), and nixpkgs probes `~/.config/nixpkgs/overlays.nix` this
+    // way in pure eval — a throw here aborts the whole evaluation.
+    const path = demandPathArg(self, arg) catch |err| switch (err) {
+        error.RestrictedInPureEval => return Value.boolVal(false),
+        else => return err,
+    };
     if (!try self.files.pathExists(path)) return Value.boolVal(false);
     // A trailing `/` or `/.` requires the target to be a directory (Nix): the
     // path model canonicalizes those away, so check the resolved type (a final
@@ -280,9 +287,11 @@ pub fn builtinFindFile(self: *VM, search_path_arg: Value, name_arg: Value) !Valu
     // which case a matching prefixless entry wins over the corepkgs default).
     const is_corepkgs = std.mem.eql(u8, name, corepkgs.fetchurl_name);
 
-    // Pure eval forbids `<...>` / NIX_PATH lookups, except the synthetic
-    // `<nix/fetchurl.nix>` corepkgs file (not a real search-path entry).
-    if (!is_corepkgs) try purity.enforceNoSearchPath(self);
+    // Pure eval exposes no search path (empty `builtins.nixPath`, see
+    // `Engine.ensureBuiltins`), so a lookup simply fails with the catchable
+    // not-found error below — as in Nix, where nixpkgs' `impure-overlays.nix`
+    // probes `<nixpkgs-overlays>` under `tryEval`. The synthetic
+    // `<nix/fetchurl.nix>` corepkgs file is unaffected either way.
 
     const path_id = try self.intern.intern("path");
     const prefix_id = try self.intern.intern("prefix");
@@ -349,9 +358,21 @@ pub fn builtinFindFile(self: *VM, search_path_arg: Value, name_arg: Value) !Valu
 }
 
 pub fn findFileCandidate(self: *VM, base: []const u8, prefix: []const u8, name: []const u8) !?[]u8 {
+    // A search-path base is a filesystem read like any other, and pure eval
+    // confines those to the store and the flake's own sources. Without this an
+    // explicit list would report the existence and canonical path of files the
+    // evaluation may not read — `builtins.findFile [{ prefix = ""; path = "/etc"; }]
+    // "hostname"` returned `/etc/hostname` — while Nix refuses with "access to
+    // absolute path '/etc' is forbidden in pure evaluation mode". `<...>` lookups
+    // stay catchable because pure eval exposes an empty `builtins.nixPath`
+    // (`Engine.ensureBuiltins`), so there is simply no base to probe.
+    try purity.enforceReadPath(self, base);
     const suffix = path_ops.searchPathSuffix(prefix, name) orelse return null;
     const candidate = try std.fs.path.resolve(self.allocator, &.{ base, suffix });
     errdefer self.allocator.free(candidate);
+    // The resolved path too: a `name` carrying `..` must not walk out of a base
+    // that is itself allowed.
+    try purity.enforceReadPath(self, candidate);
     if (try self.files.pathExists(candidate)) return candidate;
     self.allocator.free(candidate);
     return null;

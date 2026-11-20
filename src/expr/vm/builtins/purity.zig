@@ -1,8 +1,13 @@
-//! Pure-evaluation enforcement shared by the filesystem, search-path, and fetch
+//! Pure-evaluation enforcement shared by the filesystem, fetch and pure-guard
 //! builtins. In pure eval (Nix's default for flake commands; `--impure` opts
 //! out) impure operations are restricted so a flake evaluates the same for
 //! everyone: the environment is invisible, reads are confined to the store and
 //! the flake's own source, and fetches must be content-locked.
+//!
+//! Search-path lookups are deliberately *not* gated here: pure eval exposes an
+//! empty `builtins.nixPath` (`Engine.ensureBuiltins`), so a `<name>` lookup
+//! fails as a catchable "not found" — the shape nixpkgs' `impure-overlays.nix`
+//! probe relies on.
 //!
 //! Every entry point is a no-op when `policy.pure_eval` is false, so callers can
 //! invoke them unconditionally on the hot path (the branch folds to nothing when
@@ -38,13 +43,6 @@ pub fn enforceReadPath(self: *VM, path: []const u8) !void {
     if (corepkgs.source(path) != null) return;
     for (self.policy.allowed_path_roots) |root| if (under(path, root)) return;
     return restrict(self, "access to absolute path '{s}' is forbidden in pure evaluation mode (use --impure to allow)", .{path});
-}
-
-/// In pure eval, `<name>` / NIX_PATH search-path lookups are forbidden (a flake
-/// must not depend on channels or `$NIX_PATH`).
-pub fn enforceNoSearchPath(self: *VM) !void {
-    if (!self.policy.pure_eval) return;
-    return restrict(self, "'<...>' path / NIX_PATH lookups are not allowed in pure evaluation mode (use --impure to allow)", .{});
 }
 
 /// True when `attrs` carries a field that content-locks a fetch.
